@@ -18,7 +18,7 @@
 <div align="center">
 
 ```bash
-wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor && wget -qO port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh && chmod +x port-monitor && sudo bash port-monitor.sh install
+wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor && wget -qO port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh && chmod +x port-monitor && sed -i 's/\r$//' port-monitor.sh && sudo bash port-monitor.sh install
 ```
 
 </div>
@@ -268,7 +268,7 @@ pacman -S python sqlite curl iptables
 ### 一键安装
 
 ```bash
-# 方式一：Git 克隆
+# 方式一：Git 克隆（自动处理换行符）
 git clone https://github.com/linjunhao024-byte/PortSentinel.git
 cd PortSentinel
 sudo bash port-monitor.sh install
@@ -277,10 +277,11 @@ sudo bash port-monitor.sh install
 wget -O port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor
 wget -O port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh
 chmod +x port-monitor
+sed -i 's/\r$//' port-monitor.sh
 sudo bash port-monitor.sh install
 
 # 方式三：一行命令（下载 + 安装一步到位）
-wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor && wget -qO port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh && chmod +x port-monitor && sudo bash port-monitor.sh install
+wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor && wget -qO port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh && chmod +x port-monitor && sed -i 's/\r$//' port-monitor.sh && sudo bash port-monitor.sh install
 ```
 
 安装向导将自动引导你完成 7 步配置：
