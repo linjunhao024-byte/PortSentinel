@@ -11,11 +11,11 @@ PORTMONITOR_VERSION="1.0.0"
 _check_deps() {
     local missing=()
 
-    [ "$(uname -s)" != "Linux" ] && echo -e "\033[0;31m[✗]\033[0m 仅支持 Linux 系统（当前: $(uname -s））" && exit 1
+    [ "$(uname -s)" != "Linux" ] && echo -e "\033[0;31m[✗]\033[0m 仅支持 Linux 系统 [当前: $(uname -s)]" && exit 1
 
     [ -z "$BASH_VERSION" ] && echo -e "\033[0;31m[✗]\033[0m 需要 bash 环境" && exit 1
     local bash_major="${BASH_VERSINFO[0]}"
-    [ "$bash_major" -lt 4 ] && echo -e "\033[0;31m[✗]\033[0m 需要 bash 4.0+（当前: ${BASH_VERSION}）" && exit 1
+    [ "$bash_major" -lt 4 ] && echo -e "\033[0;31m[✗]\033[0m 需要 bash 4.0+[当前: ${BASH_VERSION}]" && exit 1
 
     for cmd in python3 systemctl sqlite3 curl awk sed grep tr; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
@@ -224,7 +224,7 @@ do_install() {
     print_step "步骤 2/7: 服务器环境"
     echo -e "${CYAN}服务器环境会影响监控策略:${NC}"
     echo ""
-    echo -e "  ${YELLOW}国内云服务器${NC} (阿里云/腾讯云/华为云等):"
+    echo -e "  ${YELLOW}Cloud Server${NC} [Aliyun/Tencent/Huawei]:"
     echo -e "    - 内网流量: 健康检查、云盾扫描、负载均衡探针等"
     echo -e "    - 建议: 忽略内网IP，只监控外网攻击，避免误报"
     echo ""
@@ -233,7 +233,7 @@ do_install() {
     echo -e "    - 可以监控所有流量"
     echo ""
 
-    server_env=$(ask_choice "服务器环境" "国内云服务器(阿里云/腾讯云/华为云等)" "独立服务器/VPS/海外云" "自定义配置")
+    server_env=$(ask_choice "服务器环境" "Cloud Server [Aliyun/Tencent/Huawei]" "Standalone Server/VPS" "Custom")
     case $server_env in
         1) MONITOR_MODE="cloud"; IGNORE_INTERNAL="y" ;;
         2) MONITOR_MODE="standalone"; IGNORE_INTERNAL="n" ;;
@@ -411,7 +411,7 @@ do_install() {
 
     # 自定义 SSH 端口
     echo ""
-    SSH_PORT=$(ask "SSH 端口（用于暴力破解检测）" "22")
+    SSH_PORT=$(ask "SSH 端口[用于暴力破解检测]" "22")
     if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
         warn "端口号无效，使用默认值 22"
         SSH_PORT="22"
@@ -446,7 +446,7 @@ do_install() {
     echo -e "  SSH端口: :${SSH_PORT:-22}"
     echo -e "  白名单: ${ADMIN_IP:-无}"
     if [ "$IGNORE_INTERNAL" = "y" ]; then
-        echo -e "  内网IP: ${GREEN}已忽略（避免云平台误报）${NC}"
+        echo -e "  内网IP: ${GREEN}已忽略[避免云平台误报]${NC}"
     fi
     echo ""
 
@@ -666,7 +666,7 @@ do_update() {
         exit 1
     fi
 
-    echo -e "${CYAN}将更新 PortSentinel 程序文件（配置和数据保留不变）${NC}\n"
+    echo -e "${CYAN}将更新 PortSentinel 程序文件[配置和数据保留不变]${NC}\n"
 
     local backup="/tmp/port-monitor.bak.$(date +%s)"
     cp "$INSTALL_DIR/port-monitor" "$backup"
@@ -690,7 +690,7 @@ do_update() {
 
 do_uninstall() {
     check_root
-    echo -e "${RED}警告: 将卸载服务（保留配置和数据）${NC}"
+    echo -e "${RED}警告: 将卸载服务[保留配置和数据]${NC}"
     if [ "$(ask_yn "确定卸载？" "n")" != "y" ]; then return; fi
 
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -713,7 +713,7 @@ do_uninstall() {
     fi
 
     systemctl daemon-reload
-    info "卸载完成（配置保留在 $CONFIG_DIR）"
+    info "卸载完成[配置保留在 $CONFIG_DIR]"
 }
 
 do_full_uninstall() {
@@ -1148,7 +1148,7 @@ _report_send() {
     $sent || warn "无可用发送通道"
 }
 
-# 生成报告（查询 + 格式化），不发送
+# 生成报告[查询 + 格式化]，不发送
 do_report_view() {
     local period="$1" label="$2"
     echo -e "${CYAN}正在查询 ${label} 的攻击数据...${NC}"
@@ -1172,7 +1172,7 @@ do_report_send() {
     _report_send "$channel"
 }
 
-# 定时报告（通过 cron）
+# 定时报告[通过 cron]
 do_report_schedule() {
     check_root
 
@@ -1432,7 +1432,7 @@ do_health_check() {
         if [ "$perm" = "600" ]; then
             info "存在，权限 ${perm} ✓"
         else
-            warn "存在，但权限为 ${perm}（建议 600）"
+            warn "存在，但权限为 ${perm}[建议 600]"
             issues=$((issues + 1))
         fi
     else
@@ -1455,7 +1455,7 @@ do_health_check() {
             issues=$((issues + 1))
         fi
     else
-        warn "数据库文件不存在（首次运行后自动创建）"
+        warn "数据库文件不存在[首次运行后自动创建]"
     fi
 
     # 5. 防火墙
@@ -1487,7 +1487,7 @@ do_health_check() {
     local disk_usage
     disk_usage=$(df -h / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
     if [ -n "$disk_usage" ] && [ "$disk_usage" -gt 90 ]; then
-        error "磁盘使用率 ${disk_usage}%（>90%）"
+        error "磁盘使用率 ${disk_usage}%[>90%]"
         issues=$((issues + 1))
     else
         info "磁盘使用率 ${disk_usage:-?}%"
