@@ -103,9 +103,9 @@ ask() {
     local input=""
     while true; do
         if [ -n "$default" ]; then
-            echo -n -e "${YELLOW}${prompt} [${default}]: ${NC}"
+            echo -n -e "${YELLOW}${prompt} [${default}]: ${NC}" >&2
         else
-            echo -n -e "${YELLOW}${prompt}: ${NC}"
+            echo -n -e "${YELLOW}${prompt}: ${NC}" >&2
         fi
         read -r input
         if [ -n "$input" ]; then
@@ -115,7 +115,7 @@ ask() {
             echo "$default"
             return
         fi
-        error "此项不能为空，请重新输入"
+        error "此项不能为空，请重新输入" >&2
     done
 }
 
@@ -124,9 +124,9 @@ ask_optional() {
     local prompt="$1" default="$2"
     local input=""
     if [ -n "$default" ]; then
-        echo -n -e "${YELLOW}${prompt} [${default}]: ${NC}"
+        echo -n -e "${YELLOW}${prompt} [${default}]: ${NC}" >&2
     else
-        echo -n -e "${YELLOW}${prompt}: ${NC}"
+        echo -n -e "${YELLOW}${prompt}: ${NC}" >&2
     fi
     read -r input
     echo "${input:-$default}"
@@ -136,11 +136,11 @@ ask_yn() {
     local prompt="$1" default="${2:-n}"
     local input=""
     while true; do
-        echo -n -e "${YELLOW}${prompt} [$([ "$default" = "y" ] && echo "Y/n" || echo "y/N")]: ${NC}"
+        echo -n -e "${YELLOW}${prompt} [$([ "$default" = "y" ] && echo "Y/n" || echo "y/N")]: ${NC}" >&2
         read -r input
         input=$(echo "${input:-$default}" | tr '[:upper:]' '[:lower:]')
         [[ "$input" =~ ^[yn]$ ]] && echo "$input" && return
-        error "请输入 y 或 n"
+        error "请输入 y 或 n" >&2
     done
 }
 
@@ -150,21 +150,19 @@ ask_choice() {
     local options=("$@")
     local count=${#options[@]}
     local choice=""
-    printf '%b\n' "${YELLOW}${prompt}${NC}"
-    local i=0
-    while [ $i -lt $count ]; do
-        printf '  %b[%d]%b %s\n' "${CYAN}" "$((i+1))" "${NC}" "${options[$i]}"
-        i=$((i + 1))
+    echo -e "${YELLOW}${prompt}${NC}" >&2
+    for i in "${!options[@]}"; do
+        echo -e "  ${CYAN}[$((i+1))]${NC} ${options[$i]}" >&2
     done
     while true; do
-        printf '%b' "${GREEN}请选择 [1-${count}]: ${NC}"
+        echo -n -e "${GREEN}请选择 [1-${count}]: ${NC}" >&2
         read -r choice
         choice="${choice:-1}"
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
             echo "$choice"
             return
         fi
-        error "请输入 1-${count} 之间的数字"
+        error "请输入 1-${count} 之间的数字" >&2
     done
 }
 
