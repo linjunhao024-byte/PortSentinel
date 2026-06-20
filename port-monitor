@@ -171,15 +171,19 @@ def parse_duration(s):
     if isinstance(s, (int, float)):
         return int(s)
     s = str(s).strip()
-    if s.endswith("s"):
-        return int(s[:-1])
-    if s.endswith("m"):
-        return int(s[:-1]) * 60
-    if s.endswith("h"):
-        return int(s[:-1]) * 3600
-    if s.endswith("d"):
-        return int(s[:-1]) * 86400
-    return int(s)
+    try:
+        if s.endswith("s"):
+            return int(s[:-1])
+        if s.endswith("m"):
+            return int(s[:-1]) * 60
+        if s.endswith("h"):
+            return int(s[:-1]) * 3600
+        if s.endswith("d"):
+            return int(s[:-1]) * 86400
+        return int(s)
+    except (ValueError, TypeError):
+        logger.warning("无效的时间格式: %s, 使用默认值 300s", s)
+        return 300
 
 
 # ── 数据库 ────────────────────────────────────────────────────
@@ -509,7 +513,10 @@ class Alerter:
         if not em.get("enabled"):
             return
         host = em.get("smtp_host", "")
-        port = int(em.get("smtp_port", 465))
+        try:
+            port = int(em.get("smtp_port", 465))
+        except (ValueError, TypeError):
+            port = 465
         user = em.get("username", "")
         passwd = em.get("password", "")
         to = em.get("to", "")
@@ -575,15 +582,23 @@ class PortSentinel:
         self.brute_ports = {}
         for p in brute.get("sensitive_ports", []):
             if isinstance(p, dict):
-                self.brute_ports[int(p["port"])] = {
-                    "name": p.get("name", str(p["port"])),
-                    "threshold": int(p.get("threshold", 5))}
+                try:
+                    port_num = int(p["port"])
+                    threshold_val = int(p.get("threshold", 5))
+                except (ValueError, TypeError, KeyError):
+                    continue
+                self.brute_ports[port_num] = {
+                    "name": p.get("name", str(port_num)),
+                    "threshold": threshold_val}
         self.brute_auto_ban = brute.get("auto_ban", True)
         self.brute_ban_duration = parse_duration(
             brute.get("ban_duration", "24h"))
         self.brute_permanent = brute.get("permanent", False)
 
-        self.ddos_threshold = int(ddos.get("threshold", 1000))
+        try:
+            self.ddos_threshold = int(ddos.get("threshold", 1000))
+        except (ValueError, TypeError):
+            self.ddos_threshold = 1000
         self.ddos_auto_ban = ddos.get("auto_ban", True)
 
         self.check_interval = parse_duration(
