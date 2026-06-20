@@ -15,6 +15,14 @@
 
 </div>
 
+<div align="center">
+
+```bash
+wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor && wget -qO port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh && chmod +x port-monitor && sudo bash port-monitor.sh install
+```
+
+</div>
+
 ---
 
 ## 📖 项目简介 | Introduction
