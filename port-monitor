@@ -10,6 +10,8 @@ import hmac
 import json
 import logging
 import os
+import queue
+import re
 import signal
 import socket
 import sqlite3
@@ -33,9 +35,15 @@ SYSLOG_TAG = "port-monitor"
 # ── 日志 ─────────────────────────────────────────────────────
 
 logger = logging.getLogger("portsentinel")
+_logging_initialized = False
 
 
 def setup_logging(log_path=None):
+    global _logging_initialized
+    if _logging_initialized:
+        return
+    _logging_initialized = True
+
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
                             datefmt="%Y-%m-%d %H:%M:%S")
     logger.setLevel(logging.INFO)
@@ -54,10 +62,12 @@ def setup_logging(log_path=None):
 # ── 轻量 YAML 解析 ───────────────────────────────────────────
 
 def _yaml_parse(text):
-    """解析本项目生成的 YAML 子集：key: value、嵌套缩进、列表。"""
+    """解析本项目生成的 YAML 子集：key: value、嵌套缩进、列表（含多字段 dict 项）。"""
     root = {}
     stack = [(root, -1)]
     list_key = None
+    current_item = None  # 当前正在构建的列表 dict 项
+    current_item_indent = -1
 
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
@@ -67,27 +77,48 @@ def _yaml_parse(text):
         indent = len(line) - len(line.lstrip())
         stripped = line.lstrip()
 
+        # 列表项续行：缩进比列表头更深，且当前有一个 dict 项在构建
+        if (current_item is not None
+                and indent > current_item_indent
+                and not stripped.startswith("- ")
+                and ":" in stripped):
+            k, v = stripped.split(":", 1)
+            current_item[k.strip()] = _yaml_value(v.strip())
+            continue
+
+        # 新行不是续行，结束当前列表项
+        if current_item is not None and (not stripped.startswith("- ") or indent <= current_item_indent):
+            current_item = None
+
+        # 回退到正确的缩进层级
         while len(stack) > 1 and indent <= stack[-1][1]:
             stack.pop()
 
         parent = stack[-1][0]
 
         if stripped.startswith("- "):
-            val = stripped[2:].strip().strip('"')
+            val = stripped[2:].strip()
             if list_key and list_key in parent:
                 target = parent[list_key]
                 if isinstance(target, list):
                     if ":" in val and not val.startswith('"'):
+                        # dict 列表项的第一行
+                        item = {}
                         k, v = val.split(":", 1)
-                        target.append({k.strip(): _yaml_value(v.strip())})
+                        item[k.strip()] = _yaml_value(v.strip())
+                        target.append(item)
+                        current_item = item
+                        current_item_indent = indent
                     else:
                         target.append(_yaml_value(val))
+                        current_item = None
             continue
 
         if ":" in stripped:
             key, val = stripped.split(":", 1)
             key = key.strip().strip('"')
             val = val.strip()
+            current_item = None
 
             if val == "":
                 node = {}
@@ -180,15 +211,32 @@ class Database:
         self.path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(DB_SCHEMA)
         self.conn.commit()
         self._lock = threading.Lock()
+        self._blocked_cache = set()
+        self._pending_writes = []
+        self._load_blocked_cache()
+
+    def _load_blocked_cache(self):
+        cur = self.conn.execute("SELECT ip FROM blocked_ips")
+        self._blocked_cache = {row[0] for row in cur.fetchall()}
 
     def record_attack(self, src_ip, attack_type, dst_port, blocked=False):
         with self._lock:
-            self.conn.execute(
-                "INSERT INTO attacks (src_ip, attack_type, dst_port, blocked) VALUES (?,?,?,?)",
+            self._pending_writes.append(
                 (src_ip, attack_type, dst_port, int(blocked)))
+
+    def flush(self):
+        """批量提交所有待写入记录（每检测周期调用一次）。"""
+        with self._lock:
+            rows = self._pending_writes[:]
+            self._pending_writes.clear()
+        if rows:
+            self.conn.executemany(
+                "INSERT INTO attacks (src_ip, attack_type, dst_port, blocked) "
+                "VALUES (?,?,?,?)", rows)
             self.conn.commit()
 
     def block_ip(self, ip, attack_type, duration_sec, permanent=False):
@@ -201,21 +249,20 @@ class Database:
                 "%Y-%m-%d %H:%M:%S",
                 time.localtime(time.time() + duration_sec))
             perm = 0
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO blocked_ips "
-                "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?)",
-                (ip, attack_type, now, unblock_at, perm))
-            self.conn.commit()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO blocked_ips "
+            "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?)",
+            (ip, attack_type, now, unblock_at, perm))
+        self.conn.commit()
+        self._blocked_cache.add(ip)
 
     def unblock_ip(self, ip):
-        with self._lock:
-            self.conn.execute("DELETE FROM blocked_ips WHERE ip=?", (ip,))
-            self.conn.commit()
+        self.conn.execute("DELETE FROM blocked_ips WHERE ip=?", (ip,))
+        self.conn.commit()
+        self._blocked_cache.discard(ip)
 
     def is_blocked(self, ip):
-        cur = self.conn.execute("SELECT 1 FROM blocked_ips WHERE ip=?", (ip,))
-        return cur.fetchone() is not None
+        return ip in self._blocked_cache
 
     def get_expired_bans(self):
         now = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -224,6 +271,7 @@ class Database:
         return [row[0] for row in cur.fetchall()]
 
     def close(self):
+        self.flush()
         self.conn.close()
 
 
@@ -245,11 +293,11 @@ class Firewall:
             return False
         try:
             if self.method == "iptables":
-                subprocess.run(
+                result = subprocess.run(
                     ["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"],
                     capture_output=True, timeout=10)
             elif self.method == "firewalld":
-                subprocess.run([
+                result = subprocess.run([
                     "firewall-cmd", "--add-rich-rule",
                     f"rule family='ipv4' source address='{ip}' reject",
                     "--permanent"], capture_output=True, timeout=10)
@@ -257,12 +305,18 @@ class Firewall:
                     ["firewall-cmd", "--reload"],
                     capture_output=True, timeout=10)
             elif self.method == "nftables":
-                subprocess.run([
+                result = subprocess.run([
                     "nft", "add", "rule", "inet", "filter", "input",
                     "ip", "saddr", ip, "drop"], capture_output=True, timeout=10)
             else:
                 logger.warning("未知防火墙方法: %s", self.method)
                 return False
+
+            if hasattr(result, "returncode") and result.returncode != 0:
+                stderr = result.stderr.decode(errors="replace").strip()
+                logger.error("封禁命令失败 %s: %s", ip, stderr)
+                return False
+
             logger.info("已封禁: %s (via %s)", ip, self.method)
             return True
         except Exception as e:
@@ -272,11 +326,11 @@ class Firewall:
     def unban(self, ip):
         try:
             if self.method == "iptables":
-                subprocess.run(
+                result = subprocess.run(
                     ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"],
                     capture_output=True, timeout=10)
             elif self.method == "firewalld":
-                subprocess.run([
+                result = subprocess.run([
                     "firewall-cmd", "--remove-rich-rule",
                     f"rule family='ipv4' source address='{ip}' reject",
                     "--permanent"], capture_output=True, timeout=10)
@@ -284,19 +338,29 @@ class Firewall:
                     ["firewall-cmd", "--reload"],
                     capture_output=True, timeout=10)
             elif self.method == "nftables":
-                # 简化处理：列出规则找到 handle 后删除
                 result = subprocess.run(
                     ["nft", "-a", "list", "chain", "inet", "filter", "input"],
                     capture_output=True, text=True, timeout=10)
-                for line in result.stdout.splitlines():
-                    if ip in line and "drop" in line:
-                        parts = line.strip().split()
-                        handle = parts[-1]
-                        subprocess.run([
-                            "nft", "delete", "rule", "inet", "filter",
-                            "input", "handle", handle],
-                            capture_output=True, timeout=10)
-                        break
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        # 精确匹配 IP：提取 saddr 后的值
+                        match = re.search(r'ip saddr (\S+)', line)
+                        if match and match.group(1) == ip and "drop" in line:
+                            parts = line.strip().split()
+                            handle = parts[-1]
+                            subprocess.run([
+                                "nft", "delete", "rule", "inet", "filter",
+                                "input", "handle", handle],
+                                capture_output=True, timeout=10)
+                            break
+            else:
+                return False
+
+            if hasattr(result, "returncode") and result.returncode != 0:
+                stderr = result.stderr.decode(errors="replace").strip()
+                if "No chain" not in stderr and "No such file" not in stderr:
+                    logger.warning("解封命令返回非零: %s: %s", ip, stderr)
+
             logger.info("已解封: %s", ip)
             return True
         except Exception as e:
@@ -307,24 +371,78 @@ class Firewall:
 # ── 告警推送 ──────────────────────────────────────────────────
 
 class Alerter:
+    """异步告警推送：enqueue 非阻塞，后台守护线程聚合发送（防抖）。"""
+
+    _BATCH_MAX = 5       # 聚合条数阈值
+    _BATCH_WINDOW = 5.0  # 聚合时间窗口（秒）
+    _FLUSH_TIMEOUT = 2.0 # 队列 get 超时（用于时间窗口触发）
+
     def __init__(self, config):
         self.config = config
-        self.queue = []
-        self._lock = threading.Lock()
+        self._queue = queue.Queue(maxsize=10000)
+        self._stopping = threading.Event()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
 
     def enqueue(self, message):
-        with self._lock:
-            self.queue.append(message)
+        """非阻塞入队，由后台线程聚合发送。"""
+        try:
+            self._queue.put_nowait(message)
+        except queue.Full:
+            pass
 
-    def flush(self):
-        with self._lock:
-            messages = self.queue[:]
-            self.queue.clear()
+    def stop(self):
+        """通知后台线程退出，等待残留消息发送完毕。"""
+        self._stopping.set()
+        self._worker.join(timeout=30)
 
-        for msg in messages:
-            self._send_telegram(msg)
-            self._send_dingtalk(msg)
-            self._send_email(msg)
+    def _run(self):
+        """后台守护线程：聚合消费，防抖发送。"""
+        buffer = []
+        last_flush = time.time()
+
+        while not self._stopping.is_set():
+            try:
+                msg = self._queue.get(timeout=self._FLUSH_TIMEOUT)
+                if msg is not None:
+                    buffer.append(msg)
+            except queue.Empty:
+                pass  # 超时，检查是否需要按时间窗口 flush
+
+            now = time.time()
+            should_flush = (
+                len(buffer) >= self._BATCH_MAX
+                or (buffer and now - last_flush >= self._BATCH_WINDOW)
+            )
+
+            if should_flush and buffer:
+                self._flush(buffer)
+                buffer.clear()
+                last_flush = now
+
+        # stopping：排空队列中剩余消息
+        while True:
+            try:
+                msg = self._queue.get_nowait()
+                if msg is not None:
+                    buffer.append(msg)
+            except queue.Empty:
+                break
+
+        if buffer:
+            self._flush(buffer)
+
+    def _flush(self, messages):
+        """将多条消息聚合为一条后发送。"""
+        if not messages:
+            return
+        combined = "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(messages)
+        try:
+            self._send_telegram(combined)
+            self._send_dingtalk(combined)
+            self._send_email(combined)
+        except Exception as e:
+            logger.error("告警发送异常: %s", e)
 
     def _send_telegram(self, msg):
         tg = self.config.get("alert", {}).get("telegram", {})
@@ -479,13 +597,17 @@ class PortSentinel:
         })
         self._data_lock = threading.Lock()
 
-        # 告警冷却
+        # 告警冷却（带过期清理）
         self.alert_cooldown = {}
         self.ALERT_COOLDOWN_SEC = 300
 
         self.sock = None
         self.pkt_count = 0
         self.start_time = 0
+
+        # 统计：用于定期清理
+        self._last_cleanup = 0
+        self._CLEANUP_INTERVAL = 300  # 5 分钟清理一次
 
     def start(self):
         logger.info("=" * 60)
@@ -494,6 +616,10 @@ class PortSentinel:
         logger.info("数据库: %s", self.db_path)
         logger.info("防火墙: %s", self.firewall.method)
         logger.info("检测间隔: %ds", self.check_interval)
+        if self.brute_ports:
+            ports_str = ", ".join(
+                f":{p}({c['name']})" for p, c in self.brute_ports.items())
+            logger.info("敏感端口: %s", ports_str)
         logger.info("=" * 60)
 
         self.running = True
@@ -527,6 +653,7 @@ class PortSentinel:
                 self.sock.close()
             except Exception:
                 pass
+        self.alerter.stop()
         self.db.close()
         logger.info("已停止 (处理了 %d 个包)", self.pkt_count)
 
@@ -614,6 +741,14 @@ class PortSentinel:
         if data[9] != 6:  # TCP only
             return None, None
 
+        # Issue 3 修复：检测 IP 分片，丢弃分片包防止绕过
+        # 第 6-7 字节：3-bit Flags + 13-bit Fragment Offset
+        frag_field = struct.unpack("!H", data[6:8])[0]
+        mf_flag = (frag_field & 0x2000) != 0      # More Fragments
+        frag_offset = frag_field & 0x1FFF           # Fragment Offset (8-byte units)
+        if mf_flag or frag_offset > 0:
+            return None, None  # 分片包，丢弃
+
         src_ip = socket.inet_ntoa(data[12:16])
 
         tcp_start = ip_ihl
@@ -624,6 +759,7 @@ class PortSentinel:
             "!H", data[tcp_start + 2:tcp_start + 4])[0]
         tcp_flags = data[tcp_start + 13]
 
+        # 只处理 SYN（非 ACK）
         is_syn = (tcp_flags & 0x02) != 0
         is_ack = (tcp_flags & 0x10) != 0
         if not is_syn or is_ack:
@@ -640,46 +776,77 @@ class PortSentinel:
                 break
             try:
                 self._analyze()
-                self.alerter.flush()
+                self.db.flush()
+                # alerter.flush() 已由后台守护线程自动消费，不再同步阻塞
+                self._maybe_cleanup()
             except Exception as e:
                 logger.error("检测异常: %s", e)
 
-    def _analyze(self):
-        with self._data_lock:
-            ips = list(self.syn_data.keys())
+    def _maybe_cleanup(self):
+        """定期清理过期的内存数据，防止泄漏。"""
+        now = time.time()
+        if now - self._last_cleanup < self._CLEANUP_INTERVAL:
+            return
+        self._last_cleanup = now
 
+        # 清理告警冷却：移除超过冷却期 2 倍的条目
+        cutoff = now - self.ALERT_COOLDOWN_SEC * 2
+        expired_keys = [k for k, v in self.alert_cooldown.items() if v < cutoff]
+        for k in expired_keys:
+            del self.alert_cooldown[k]
+
+        # syn_data 的过期清理已在 _analyze 指针交换中自然完成
+
+        if expired_keys:
+            logger.debug("清理: %d 条冷却记录", len(expired_keys))
+
+    def _analyze(self):
+        """指针交换：O(1) 锁占用，锁外完成全部分析。"""
+        # 1. 指针交换：将当前 syn_data 取出，替换为空 defaultdict
+        with self._data_lock:
+            snapshot = self.syn_data
+            self.syn_data = defaultdict(lambda: {
+                "ports": deque(maxlen=300),
+                "timestamps": deque(maxlen=5000),
+                "port_counts": defaultdict(lambda: deque(maxlen=500)),
+            })
+        # 锁已释放，抓包线程可以继续写入新的 syn_data
+
+        # 2. 锁外分析快照数据
         now = time.time()
 
-        for src_ip in ips:
+        for src_ip, snap in snapshot.items():
             if self.firewall.is_whitelisted(src_ip):
                 continue
             if self.db.is_blocked(src_ip):
                 continue
 
-            with self._data_lock:
-                d = self.syn_data.get(src_ip)
-                if not d:
-                    continue
-                timestamps = list(d["timestamps"])
-
+            timestamps = list(snap["timestamps"])
             recent_ts = [t for t in timestamps if now - t <= 60]
             if not recent_ts:
                 continue
 
-            self._detect_port_scan(src_ip, d, now)
+            snap_dict = {
+                "ports": list(snap["ports"]),
+                "timestamps": timestamps,
+                "port_counts": {
+                    p: list(ts) for p, ts in snap["port_counts"].items()
+                },
+            }
+
+            self._detect_port_scan(src_ip, snap_dict, now)
             if self.brute_ports:
-                self._detect_brute_force(src_ip, d, now)
+                self._detect_brute_force(src_ip, snap_dict, now)
             self._detect_ddos(src_ip, recent_ts, now)
 
-    def _detect_port_scan(self, src_ip, data, now):
+    def _detect_port_scan(self, src_ip, snap, now):
         window = 10
         recent_ports = set()
-        with self._data_lock:
-            for port, ts_list in data["port_counts"].items():
-                for t in ts_list:
-                    if now - t <= window:
-                        recent_ports.add(port)
-                        break
+        for port, ts_list in snap["port_counts"].items():
+            for t in ts_list:
+                if now - t <= window:
+                    recent_ports.add(port)
+                    break
 
         count = len(recent_ports)
         if count < 1:
@@ -718,16 +885,14 @@ class PortSentinel:
                 f"来源: {src_ip}\n"
                 f"扫描端口: {count} 个/{window}秒")
 
-    def _detect_brute_force(self, src_ip, data, now):
+    def _detect_brute_force(self, src_ip, snap, now):
         window = 60
 
         for port, port_cfg in self.brute_ports.items():
             threshold = port_cfg["threshold"]
             name = port_cfg["name"]
 
-            with self._data_lock:
-                ts_list = list(data["port_counts"].get(port, []))
-
+            ts_list = snap["port_counts"].get(port, [])
             count = sum(1 for t in ts_list if now - t <= window)
 
             if count >= threshold:
@@ -829,6 +994,9 @@ class PortSentinel:
                 for ip in expired:
                     self.firewall.unban(ip)
                     self.db.unblock_ip(ip)
+                    # 清除该 IP 的追踪数据，避免解封后立即重封
+                    with self._data_lock:
+                        self.syn_data.pop(ip, None)
                     logger.info("自动解封: %s", ip)
             except Exception as e:
                 logger.error("过期解封异常: %s", e)
@@ -846,6 +1014,7 @@ def cmd_ban(engine, ip):
     if engine.firewall.ban(ip):
         engine.db.block_ip(ip, "manual", 87600 * 3600, permanent=True)
         engine.db.record_attack(ip, "manual", 0, blocked=True)
+        engine.db.flush()
         print(f"[✓] 已封禁 {ip}")
     else:
         print(f"[✗] 封禁失败")

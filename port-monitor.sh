@@ -408,6 +408,15 @@ do_install() {
     esac
     info "检测规则已配置: 端口扫描=${SCAN_THRESHOLD}个/10秒, SSH破解=${BRUTE_THRESHOLD}次/分钟"
 
+    # 自定义 SSH 端口
+    echo ""
+    SSH_PORT=$(ask "SSH 端口（用于暴力破解检测）" "22")
+    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+        warn "端口号无效，使用默认值 22"
+        SSH_PORT="22"
+    fi
+    info "SSH 端口已设置: :${SSH_PORT}"
+
     print_step "步骤 6/7: 快捷键设置"
     echo -e "${CYAN}设置快捷命令，方便快速打开管理面板${NC}"
     echo -e "${YELLOW}提示: 设置后可在终端直接输入快捷键打开管理面板${NC}"
@@ -433,6 +442,7 @@ do_install() {
     else
         echo -e "  自动封禁: ${RED}未启用${NC}"
     fi
+    echo -e "  SSH端口: :${SSH_PORT:-22}"
     echo -e "  白名单: ${ADMIN_IP:-无}"
     if [ "$IGNORE_INTERNAL" = "y" ]; then
         echo -e "  内网IP: ${GREEN}已忽略（避免云平台误报）${NC}"
@@ -450,8 +460,7 @@ do_install() {
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     _ROLLBACK_ITEMS+=("$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR")
 
-    cp ./port-monitor "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/port-monitor"
+    install -m 755 ./port-monitor "$INSTALL_DIR/port-monitor"
     _ROLLBACK_ITEMS+=("$INSTALL_DIR/port-monitor")
 
     generate_config
@@ -465,6 +474,8 @@ do_install() {
 
     create_service
     _ROLLBACK_ITEMS+=("/etc/systemd/system/${SERVICE_NAME}.service")
+
+    create_logrotate
 
     cp "$0" "/usr/local/bin/port-monitor-ctl"
     chmod +x "/usr/local/bin/port-monitor-ctl"
@@ -501,6 +512,15 @@ do_install() {
     fi
 }
 
+# YAML 安全转义：对可能含特殊字符的值进行转义，防止解析器崩溃
+_yaml_escape() {
+    local val="$1"
+    # 先转义反斜杠，再转义双引号
+    val="${val//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    echo "$val"
+}
+
 generate_config() {
     # permanent 映射为 87600h，引擎侧应根据 permanent 字段走独立封禁逻辑
     local brute_ban_display="$BRUTE_BAN_DURATION"
@@ -533,7 +553,7 @@ rules:
     ban_duration: ${brute_ban_display:-24h}
     permanent: $([ "$BRUTE_BAN_DURATION" = "permanent" ] && echo "true" || echo "false")
     sensitive_ports:
-      - port: 22
+      - port: ${SSH_PORT:-22}
         name: "SSH"
         threshold: $BRUTE_THRESHOLD
       - port: 3306
@@ -551,21 +571,21 @@ rules:
 alert:
   telegram:
     enabled: $([ "$ENABLE_TELEGRAM" = "y" ] && echo "true" || echo "false")
-    bot_token: "$TELEGRAM_BOT_TOKEN"
-    chat_id: "$TELEGRAM_CHAT_ID"
+    bot_token: "$(_yaml_escape "$TELEGRAM_BOT_TOKEN")"
+    chat_id: "$(_yaml_escape "$TELEGRAM_CHAT_ID")"
 
   dingtalk:
     enabled: $([ "$ENABLE_DINGTALK" = "y" ] && echo "true" || echo "false")
-    webhook: "$DINGTALK_WEBHOOK"
-    secret: "$DINGTALK_SECRET"
+    webhook: "$(_yaml_escape "$DINGTALK_WEBHOOK")"
+    secret: "$(_yaml_escape "$DINGTALK_SECRET")"
 
   email:
     enabled: $([ "$ENABLE_EMAIL" = "y" ] && echo "true" || echo "false")
     smtp_host: "$EMAIL_HOST"
     smtp_port: ${EMAIL_PORT:-465}
-    username: "$EMAIL_USER"
-    password: "$EMAIL_PASS"
-    to: "$EMAIL_TO"
+    username: "$(_yaml_escape "$EMAIL_USER")"
+    password: "$(_yaml_escape "$EMAIL_PASS")"
+    to: "$(_yaml_escape "$EMAIL_TO")"
 
   log:
     enabled: true
@@ -615,6 +635,21 @@ WantedBy=multi-user.target
 EOF
 }
 
+create_logrotate() {
+    cat > "/etc/logrotate.d/port-monitor" << EOF
+${LOG_DIR}/port-monitor.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+    create 640 root root
+}
+EOF
+}
+
 do_update() {
     check_root
     print_banner
@@ -636,8 +671,9 @@ do_update() {
     cp "$INSTALL_DIR/port-monitor" "$backup"
     info "已备份旧版本到 $backup"
 
-    cp ./port-monitor "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/port-monitor"
+    # 原子替换：先删后写，避免 Text file busy 错误
+    rm -f "$INSTALL_DIR/port-monitor"
+    install -m 755 ./port-monitor "$INSTALL_DIR/port-monitor"
     info "程序文件已更新"
 
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
@@ -701,6 +737,7 @@ do_full_uninstall() {
         done
     fi
 
+    rm -f "/etc/logrotate.d/port-monitor"
     rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     systemctl daemon-reload
     info "完全卸载完成"
