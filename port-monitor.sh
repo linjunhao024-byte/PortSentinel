@@ -150,12 +150,14 @@ ask_choice() {
     local options=("$@")
     local count=${#options[@]}
     local choice=""
-    echo -e "${YELLOW}${prompt}${NC}"
-    for i in "${!options[@]}"; do
-        echo -e "  ${CYAN}[$((i+1))]${NC} ${options[$i]}"
+    printf '%b\n' "${YELLOW}${prompt}${NC}"
+    local i=0
+    while [ $i -lt $count ]; do
+        printf '  %b[%d]%b %s\n' "${CYAN}" "$((i+1))" "${NC}" "${options[$i]}"
+        i=$((i + 1))
     done
     while true; do
-        echo -n -e "${GREEN}请选择 [1-${count}]: ${NC}"
+        printf '%b' "${GREEN}请选择 [1-${count}]: ${NC}"
         read -r choice
         choice="${choice:-1}"
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
