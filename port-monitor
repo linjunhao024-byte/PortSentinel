@@ -1,0 +1,895 @@
+#!/usr/bin/env python3
+"""
+PortSentinel - 端口安全监控检测引擎 v1.0.0
+高性能端口扫描、暴力破解、DDoS 检测与主动防御
+"""
+
+import argparse
+import hashlib
+import hmac
+import json
+import logging
+import os
+import signal
+import socket
+import sqlite3
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import defaultdict, deque
+from email.mime.text import MIMEText
+from smtplib import SMTP, SMTP_SSL
+
+# ── 全局常量 ─────────────────────────────────────────────────
+
+VERSION = "1.0.0"
+SYSLOG_TAG = "port-monitor"
+
+# ── 日志 ─────────────────────────────────────────────────────
+
+logger = logging.getLogger("portsentinel")
+
+
+def setup_logging(log_path=None):
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+    logger.setLevel(logging.INFO)
+
+    sh = logging.StreamHandler(sys.stderr)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+
+    if log_path:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+
+# ── 轻量 YAML 解析 ───────────────────────────────────────────
+
+def _yaml_parse(text):
+    """解析本项目生成的 YAML 子集：key: value、嵌套缩进、列表。"""
+    root = {}
+    stack = [(root, -1)]
+    list_key = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+
+        indent = len(line) - len(line.lstrip())
+        stripped = line.lstrip()
+
+        while len(stack) > 1 and indent <= stack[-1][1]:
+            stack.pop()
+
+        parent = stack[-1][0]
+
+        if stripped.startswith("- "):
+            val = stripped[2:].strip().strip('"')
+            if list_key and list_key in parent:
+                target = parent[list_key]
+                if isinstance(target, list):
+                    if ":" in val and not val.startswith('"'):
+                        k, v = val.split(":", 1)
+                        target.append({k.strip(): _yaml_value(v.strip())})
+                    else:
+                        target.append(_yaml_value(val))
+            continue
+
+        if ":" in stripped:
+            key, val = stripped.split(":", 1)
+            key = key.strip().strip('"')
+            val = val.strip()
+
+            if val == "":
+                node = {}
+                parent[key] = node
+                stack.append((node, indent))
+                list_key = None
+            elif val == "[]":
+                parent[key] = []
+                list_key = key
+            else:
+                parent[key] = _yaml_value(val)
+                list_key = None
+
+    return root
+
+
+def _yaml_value(s):
+    if s.startswith('"') and s.endswith('"'):
+        return s[1:-1]
+    if s.startswith("'") and s.endswith("'"):
+        return s[1:-1]
+    low = s.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("null", "~"):
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+def load_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    return _yaml_parse(text)
+
+
+# ── 时间解析 ──────────────────────────────────────────────────
+
+def parse_duration(s):
+    """将 '30m', '1h', '24h', '7d' 转为秒数。"""
+    if isinstance(s, (int, float)):
+        return int(s)
+    s = str(s).strip()
+    if s.endswith("s"):
+        return int(s[:-1])
+    if s.endswith("m"):
+        return int(s[:-1]) * 60
+    if s.endswith("h"):
+        return int(s[:-1]) * 3600
+    if s.endswith("d"):
+        return int(s[:-1]) * 86400
+    return int(s)
+
+
+# ── 数据库 ────────────────────────────────────────────────────
+
+DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS blocked_ips (
+    ip TEXT PRIMARY KEY,
+    attack_type TEXT,
+    blocked_at TEXT,
+    unblock_at TEXT,
+    permanent INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS attacks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now','localtime')),
+    src_ip TEXT,
+    attack_type TEXT,
+    dst_port INTEGER,
+    blocked INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_attacks_ts ON attacks(timestamp);
+CREATE INDEX IF NOT EXISTS idx_attacks_ip ON attacks(src_ip);
+"""
+
+
+class Database:
+    def __init__(self, db_path):
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.path = db_path
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.executescript(DB_SCHEMA)
+        self.conn.commit()
+        self._lock = threading.Lock()
+
+    def record_attack(self, src_ip, attack_type, dst_port, blocked=False):
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO attacks (src_ip, attack_type, dst_port, blocked) VALUES (?,?,?,?)",
+                (src_ip, attack_type, dst_port, int(blocked)))
+            self.conn.commit()
+
+    def block_ip(self, ip, attack_type, duration_sec, permanent=False):
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        if permanent:
+            unblock_at = "2099-01-01 00:00:00"
+            perm = 1
+        else:
+            unblock_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(time.time() + duration_sec))
+            perm = 0
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO blocked_ips "
+                "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?)",
+                (ip, attack_type, now, unblock_at, perm))
+            self.conn.commit()
+
+    def unblock_ip(self, ip):
+        with self._lock:
+            self.conn.execute("DELETE FROM blocked_ips WHERE ip=?", (ip,))
+            self.conn.commit()
+
+    def is_blocked(self, ip):
+        cur = self.conn.execute("SELECT 1 FROM blocked_ips WHERE ip=?", (ip,))
+        return cur.fetchone() is not None
+
+    def get_expired_bans(self):
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        cur = self.conn.execute(
+            "SELECT ip FROM blocked_ips WHERE permanent=0 AND unblock_at<=?", (now,))
+        return [row[0] for row in cur.fetchall()]
+
+    def close(self):
+        self.conn.close()
+
+
+# ── 防火墙执行 ────────────────────────────────────────────────
+
+class Firewall:
+    def __init__(self, method, whitelist=None):
+        self.method = method
+        self.whitelist = set(whitelist or [])
+        self.whitelist.add("127.0.0.1")
+        self.whitelist.add("::1")
+
+    def is_whitelisted(self, ip):
+        return ip in self.whitelist
+
+    def ban(self, ip):
+        if self.is_whitelisted(ip):
+            logger.warning("跳过白名单 IP: %s", ip)
+            return False
+        try:
+            if self.method == "iptables":
+                subprocess.run(
+                    ["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"],
+                    capture_output=True, timeout=10)
+            elif self.method == "firewalld":
+                subprocess.run([
+                    "firewall-cmd", "--add-rich-rule",
+                    f"rule family='ipv4' source address='{ip}' reject",
+                    "--permanent"], capture_output=True, timeout=10)
+                subprocess.run(
+                    ["firewall-cmd", "--reload"],
+                    capture_output=True, timeout=10)
+            elif self.method == "nftables":
+                subprocess.run([
+                    "nft", "add", "rule", "inet", "filter", "input",
+                    "ip", "saddr", ip, "drop"], capture_output=True, timeout=10)
+            else:
+                logger.warning("未知防火墙方法: %s", self.method)
+                return False
+            logger.info("已封禁: %s (via %s)", ip, self.method)
+            return True
+        except Exception as e:
+            logger.error("封禁失败 %s: %s", ip, e)
+            return False
+
+    def unban(self, ip):
+        try:
+            if self.method == "iptables":
+                subprocess.run(
+                    ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"],
+                    capture_output=True, timeout=10)
+            elif self.method == "firewalld":
+                subprocess.run([
+                    "firewall-cmd", "--remove-rich-rule",
+                    f"rule family='ipv4' source address='{ip}' reject",
+                    "--permanent"], capture_output=True, timeout=10)
+                subprocess.run(
+                    ["firewall-cmd", "--reload"],
+                    capture_output=True, timeout=10)
+            elif self.method == "nftables":
+                # 简化处理：列出规则找到 handle 后删除
+                result = subprocess.run(
+                    ["nft", "-a", "list", "chain", "inet", "filter", "input"],
+                    capture_output=True, text=True, timeout=10)
+                for line in result.stdout.splitlines():
+                    if ip in line and "drop" in line:
+                        parts = line.strip().split()
+                        handle = parts[-1]
+                        subprocess.run([
+                            "nft", "delete", "rule", "inet", "filter",
+                            "input", "handle", handle],
+                            capture_output=True, timeout=10)
+                        break
+            logger.info("已解封: %s", ip)
+            return True
+        except Exception as e:
+            logger.error("解封失败 %s: %s", ip, e)
+            return False
+
+
+# ── 告警推送 ──────────────────────────────────────────────────
+
+class Alerter:
+    def __init__(self, config):
+        self.config = config
+        self.queue = []
+        self._lock = threading.Lock()
+
+    def enqueue(self, message):
+        with self._lock:
+            self.queue.append(message)
+
+    def flush(self):
+        with self._lock:
+            messages = self.queue[:]
+            self.queue.clear()
+
+        for msg in messages:
+            self._send_telegram(msg)
+            self._send_dingtalk(msg)
+            self._send_email(msg)
+
+    def _send_telegram(self, msg):
+        tg = self.config.get("alert", {}).get("telegram", {})
+        if not tg.get("enabled"):
+            return
+        token = tg.get("bot_token", "")
+        chat_id = tg.get("chat_id", "")
+        if not token or not chat_id:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            data = urllib.parse.urlencode({
+                "chat_id": chat_id,
+                "text": msg,
+                "parse_mode": "HTML"
+            }).encode()
+            req = urllib.request.Request(url, data=data, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read())
+                if result.get("ok"):
+                    logger.info("Telegram 告警发送成功")
+                else:
+                    logger.warning("Telegram 响应异常: %s", result)
+        except Exception as e:
+            logger.error("Telegram 发送失败: %s", e)
+
+    def _send_dingtalk(self, msg):
+        dt = self.config.get("alert", {}).get("dingtalk", {})
+        if not dt.get("enabled"):
+            return
+        webhook = dt.get("webhook", "")
+        if not webhook:
+            return
+        try:
+            secret = dt.get("secret", "")
+            url = webhook
+            if secret:
+                ts = str(int(time.time() * 1000))
+                sign_str = f"{ts}\n{secret}"
+                sign = urllib.parse.quote_plus(
+                    hmac.new(
+                        secret.encode(), sign_str.encode(), hashlib.sha256
+                    ).digest()
+                )
+                url = f"{webhook}&timestamp={ts}&sign={sign}"
+
+            body = json.dumps({
+                "msgtype": "text",
+                "text": {"content": f"PortSentinel\n{msg}"}
+            }).encode()
+            req = urllib.request.Request(url, data=body, method="POST")
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read())
+                if result.get("errcode") == 0:
+                    logger.info("钉钉告警发送成功")
+                else:
+                    logger.warning("钉钉响应异常: %s", result)
+        except Exception as e:
+            logger.error("钉钉发送失败: %s", e)
+
+    def _send_email(self, msg):
+        em = self.config.get("alert", {}).get("email", {})
+        if not em.get("enabled"):
+            return
+        host = em.get("smtp_host", "")
+        port = int(em.get("smtp_port", 465))
+        user = em.get("username", "")
+        passwd = em.get("password", "")
+        to = em.get("to", "")
+        if not all([host, user, passwd, to]):
+            return
+        try:
+            hostname = socket.gethostname()
+            mime = MIMEText(msg, "plain", "utf-8")
+            mime["Subject"] = f"PortSentinel 告警 - {hostname}"
+            mime["From"] = user
+            mime["To"] = to
+
+            if port == 465:
+                smtp = SMTP_SSL(host, port, timeout=15)
+            else:
+                smtp = SMTP(host, port, timeout=15)
+                smtp.starttls()
+            smtp.login(user, passwd)
+            smtp.sendmail(user, [to], mime.as_string())
+            smtp.quit()
+            logger.info("邮件告警发送成功")
+        except Exception as e:
+            logger.error("邮件发送失败: %s", e)
+
+
+# ── 检测引擎 ──────────────────────────────────────────────────
+
+class PortSentinel:
+    def __init__(self, config_path):
+        self.config_path = config_path
+        self.config = load_config(config_path)
+        self.running = False
+
+        storage = self.config.get("storage", {})
+        self.db_path = storage.get("sqlite", {}).get(
+            "path", "/var/lib/port-monitor/monitor.db")
+        self.db = Database(self.db_path)
+
+        log_cfg = self.config.get("alert", {}).get("log", {})
+        log_path = log_cfg.get(
+            "path", "/var/log/port-monitor/port-monitor.log")
+        setup_logging(log_path if log_cfg.get("enabled", True) else None)
+
+        ban_cfg = self.config.get("ban", {})
+        self.firewall = Firewall(
+            ban_cfg.get("method", "iptables"),
+            ban_cfg.get("whitelist", []))
+
+        self.alerter = Alerter(self.config)
+
+        # 检测参数
+        rules = self.config.get("rules", {})
+        scan = rules.get("port_scan", {})
+        brute = rules.get("brute_force", {})
+        ddos = rules.get("ddos", {})
+
+        self.scan_thresholds = scan.get("thresholds", {
+            "low": 5, "medium": 10, "high": 50, "critical": 500})
+        self.scan_auto_ban = scan.get("auto_ban", True)
+        self.scan_ban_duration = parse_duration(
+            scan.get("ban_duration", "1h"))
+
+        self.brute_ports = {}
+        for p in brute.get("sensitive_ports", []):
+            if isinstance(p, dict):
+                self.brute_ports[int(p["port"])] = {
+                    "name": p.get("name", str(p["port"])),
+                    "threshold": int(p.get("threshold", 5))}
+        self.brute_auto_ban = brute.get("auto_ban", True)
+        self.brute_ban_duration = parse_duration(
+            brute.get("ban_duration", "24h"))
+        self.brute_permanent = brute.get("permanent", False)
+
+        self.ddos_threshold = int(ddos.get("threshold", 1000))
+        self.ddos_auto_ban = ddos.get("auto_ban", True)
+
+        self.check_interval = parse_duration(
+            self.config.get("monitor", {}).get("interval", "5s"))
+
+        # per-IP 追踪
+        self.syn_data = defaultdict(lambda: {
+            "ports": deque(maxlen=300),
+            "timestamps": deque(maxlen=5000),
+            "port_counts": defaultdict(lambda: deque(maxlen=500)),
+        })
+        self._data_lock = threading.Lock()
+
+        # 告警冷却
+        self.alert_cooldown = {}
+        self.ALERT_COOLDOWN_SEC = 300
+
+        self.sock = None
+        self.pkt_count = 0
+        self.start_time = 0
+
+    def start(self):
+        logger.info("=" * 60)
+        logger.info("PortSentinel v%s 启动", VERSION)
+        logger.info("配置: %s", self.config_path)
+        logger.info("数据库: %s", self.db_path)
+        logger.info("防火墙: %s", self.firewall.method)
+        logger.info("检测间隔: %ds", self.check_interval)
+        logger.info("=" * 60)
+
+        self.running = True
+        self.start_time = time.time()
+
+        self._restore_bans()
+
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+        detect_thread = threading.Thread(
+            target=self._detection_loop, daemon=True)
+        detect_thread.start()
+
+        expire_thread = threading.Thread(
+            target=self._expire_loop, daemon=True)
+        expire_thread.start()
+
+        try:
+            self._capture_loop()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
+
+    def stop(self):
+        logger.info("正在停止...")
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+        self.db.close()
+        logger.info("已停止 (处理了 %d 个包)", self.pkt_count)
+
+    def _signal_handler(self, signum, frame):
+        logger.info("收到信号 %d", signum)
+        self.running = False
+
+    def _restore_bans(self):
+        cur = self.db.conn.execute("SELECT ip FROM blocked_ips")
+        ips = [row[0] for row in cur.fetchall()]
+        if ips:
+            logger.info("恢复 %d 条封禁规则...", len(ips))
+            for ip in ips:
+                self.firewall.ban(ip)
+
+    # ── 抓包 ──────────────────────────────────────────────────
+
+    def _create_socket(self):
+        try:
+            sock = socket.socket(
+                socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+            logger.info("使用 AF_PACKET 抓包")
+            return sock, "af_packet"
+        except (PermissionError, OSError):
+            pass
+
+        try:
+            sock = socket.socket(
+                socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+            logger.info("使用 AF_INET 抓包")
+            return sock, "af_inet"
+        except PermissionError:
+            logger.error("需要 root 权限运行")
+            sys.exit(1)
+
+    def _capture_loop(self):
+        self.sock, mode = self._create_socket()
+        self.sock.settimeout(1.0)
+
+        logger.info("开始抓包监控...")
+
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                if not self.running:
+                    break
+                continue
+
+            self.pkt_count += 1
+
+            if mode == "af_packet":
+                src_ip, dst_port = self._parse_af_packet(data)
+            else:
+                src_ip, dst_port = self._parse_af_inet(data)
+
+            if src_ip and dst_port:
+                with self._data_lock:
+                    d = self.syn_data[src_ip]
+                    d["ports"].append(dst_port)
+                    d["timestamps"].append(time.time())
+                    d["port_counts"][dst_port].append(time.time())
+
+    def _parse_af_packet(self, data):
+        if len(data) < 34:
+            return None, None
+        eth_proto = struct.unpack("!H", data[12:14])[0]
+        if eth_proto != 0x0800:
+            return None, None
+        return self._parse_ip_tcp(data[14:])
+
+    def _parse_af_inet(self, data):
+        return self._parse_ip_tcp(data)
+
+    def _parse_ip_tcp(self, data):
+        if len(data) < 20:
+            return None, None
+
+        ip_ihl = (data[0] & 0x0F) * 4
+        if ip_ihl < 20 or len(data) < ip_ihl:
+            return None, None
+
+        if data[9] != 6:  # TCP only
+            return None, None
+
+        src_ip = socket.inet_ntoa(data[12:16])
+
+        tcp_start = ip_ihl
+        if len(data) < tcp_start + 14:
+            return None, None
+
+        dst_port = struct.unpack(
+            "!H", data[tcp_start + 2:tcp_start + 4])[0]
+        tcp_flags = data[tcp_start + 13]
+
+        is_syn = (tcp_flags & 0x02) != 0
+        is_ack = (tcp_flags & 0x10) != 0
+        if not is_syn or is_ack:
+            return None, None
+
+        return src_ip, dst_port
+
+    # ── 检测循环 ──────────────────────────────────────────────
+
+    def _detection_loop(self):
+        while self.running:
+            time.sleep(self.check_interval)
+            if not self.running:
+                break
+            try:
+                self._analyze()
+                self.alerter.flush()
+            except Exception as e:
+                logger.error("检测异常: %s", e)
+
+    def _analyze(self):
+        with self._data_lock:
+            ips = list(self.syn_data.keys())
+
+        now = time.time()
+
+        for src_ip in ips:
+            if self.firewall.is_whitelisted(src_ip):
+                continue
+            if self.db.is_blocked(src_ip):
+                continue
+
+            with self._data_lock:
+                d = self.syn_data.get(src_ip)
+                if not d:
+                    continue
+                timestamps = list(d["timestamps"])
+
+            recent_ts = [t for t in timestamps if now - t <= 60]
+            if not recent_ts:
+                continue
+
+            self._detect_port_scan(src_ip, d, now)
+            if self.brute_ports:
+                self._detect_brute_force(src_ip, d, now)
+            self._detect_ddos(src_ip, recent_ts, now)
+
+    def _detect_port_scan(self, src_ip, data, now):
+        window = 10
+        recent_ports = set()
+        with self._data_lock:
+            for port, ts_list in data["port_counts"].items():
+                for t in ts_list:
+                    if now - t <= window:
+                        recent_ports.add(port)
+                        break
+
+        count = len(recent_ports)
+        if count < 1:
+            return
+
+        thresholds = self.scan_thresholds
+        level = None
+        ban_duration = self.scan_ban_duration
+
+        if count >= thresholds.get("critical", 500):
+            level = "critical"
+            ban_duration *= 5
+        elif count >= thresholds.get("high", 50):
+            level = "high"
+            ban_duration *= 2
+        elif count >= thresholds.get("medium", 10):
+            level = "medium"
+        elif count >= thresholds.get("low", 5):
+            level = "low"
+
+        if level and count >= thresholds.get("medium", 10):
+            if self.scan_auto_ban and level in ("medium", "high", "critical"):
+                self._execute_ban(
+                    src_ip, "port_scan", 0, ban_duration)
+            else:
+                self._alert_cooldown(
+                    src_ip, "port_scan", 0,
+                    f"🚨 端口扫描 [{level.upper()}]\n"
+                    f"来源: {src_ip}\n"
+                    f"扫描端口: {count} 个/{window}秒\n"
+                    f"级别: {level}")
+        elif level == "low":
+            self._alert_cooldown(
+                src_ip, "port_scan", 0,
+                f"⚠️ 端口扫描 [LOW]\n"
+                f"来源: {src_ip}\n"
+                f"扫描端口: {count} 个/{window}秒")
+
+    def _detect_brute_force(self, src_ip, data, now):
+        window = 60
+
+        for port, port_cfg in self.brute_ports.items():
+            threshold = port_cfg["threshold"]
+            name = port_cfg["name"]
+
+            with self._data_lock:
+                ts_list = list(data["port_counts"].get(port, []))
+
+            count = sum(1 for t in ts_list if now - t <= window)
+
+            if count >= threshold:
+                duration = self.brute_ban_duration
+                permanent = self.brute_permanent
+                if permanent:
+                    duration = 87600 * 3600
+
+                if self.brute_auto_ban:
+                    self._execute_ban(
+                        src_ip, "brute_force", port, duration,
+                        permanent=permanent)
+                else:
+                    self._alert_cooldown(
+                        src_ip, "brute_force", port,
+                        f"🚨 {name} 暴力破解\n"
+                        f"来源: {src_ip}\n"
+                        f"端口: :{port}\n"
+                        f"尝试: {count} 次/{window}秒")
+
+    def _detect_ddos(self, src_ip, recent_ts, now):
+        window = 5
+        count = sum(1 for t in recent_ts if now - t <= window)
+
+        if count >= self.ddos_threshold:
+            if self.ddos_auto_ban:
+                self._execute_ban(
+                    src_ip, "ddos", 0, self.scan_ban_duration * 3)
+            else:
+                self._alert_cooldown(
+                    src_ip, "ddos", 0,
+                    f"🚨 DDoS 攻击\n"
+                    f"来源: {src_ip}\n"
+                    f"SYN 包: {count} 个/{window}秒")
+
+    # ── 封禁执行 ──────────────────────────────────────────────
+
+    def _execute_ban(self, src_ip, attack_type, dst_port,
+                     duration_sec, permanent=False):
+        if self.db.is_blocked(src_ip):
+            return
+
+        success = self.firewall.ban(src_ip)
+        if not success:
+            return
+
+        self.db.block_ip(
+            src_ip, attack_type, duration_sec, permanent=permanent)
+        self.db.record_attack(
+            src_ip, attack_type, dst_port, blocked=True)
+
+        duration_str = ("永久" if permanent
+                        else self._format_duration(duration_sec))
+        logger.info(
+            "封禁 %s (%s, :%s, %s)",
+            src_ip, attack_type, dst_port, duration_str)
+
+        self.alerter.enqueue(
+            f"🚨 PortSentinel 自动封禁\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"来源: {src_ip}\n"
+            f"类型: {attack_type}\n"
+            f"端口: :{dst_port}\n"
+            f"时长: {duration_str}\n"
+            f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def _format_duration(self, sec):
+        if sec >= 87600 * 3600:
+            return "永久"
+        if sec >= 86400:
+            return f"{sec // 86400} 天"
+        if sec >= 3600:
+            return f"{sec // 3600} 小时"
+        return f"{sec // 60} 分钟"
+
+    # ── 告警冷却 ──────────────────────────────────────────────
+
+    def _alert_cooldown(self, src_ip, attack_type, dst_port, message):
+        key = f"{src_ip}:{attack_type}:{dst_port}"
+        now = time.time()
+        last = self.alert_cooldown.get(key, 0)
+        if now - last < self.ALERT_COOLDOWN_SEC:
+            return
+        self.alert_cooldown[key] = now
+
+        self.db.record_attack(
+            src_ip, attack_type, dst_port, blocked=False)
+        self.alerter.enqueue(message)
+
+    # ── 过期解封 ──────────────────────────────────────────────
+
+    def _expire_loop(self):
+        while self.running:
+            time.sleep(60)
+            if not self.running:
+                break
+            try:
+                expired = self.db.get_expired_bans()
+                for ip in expired:
+                    self.firewall.unban(ip)
+                    self.db.unblock_ip(ip)
+                    logger.info("自动解封: %s", ip)
+            except Exception as e:
+                logger.error("过期解封异常: %s", e)
+
+
+# ── CLI 入口 ──────────────────────────────────────────────────
+
+def cmd_ban(engine, ip):
+    if engine.firewall.is_whitelisted(ip):
+        print(f"[!] {ip} 在白名单中，跳过")
+        return
+    if engine.db.is_blocked(ip):
+        print(f"[!] {ip} 已在封禁列表中")
+        return
+    if engine.firewall.ban(ip):
+        engine.db.block_ip(ip, "manual", 87600 * 3600, permanent=True)
+        engine.db.record_attack(ip, "manual", 0, blocked=True)
+        print(f"[✓] 已封禁 {ip}")
+    else:
+        print(f"[✗] 封禁失败")
+
+
+def cmd_unban(engine, ip):
+    if not engine.db.is_blocked(ip):
+        print(f"[!] {ip} 不在封禁列表中")
+        return
+    engine.firewall.unban(ip)
+    engine.db.unblock_ip(ip)
+    print(f"[✓] 已解封 {ip}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="PortSentinel 端口安全监控引擎")
+    parser.add_argument(
+        "-config", dest="config_path", help="配置文件路径")
+    parser.add_argument(
+        "command", nargs="?", choices=["ban", "unban"], help="手动操作")
+    parser.add_argument("ip", nargs="?", help="目标 IP")
+    parser.add_argument(
+        "-v", "--version", action="version",
+        version=f"PortSentinel v{VERSION}")
+
+    args = parser.parse_args()
+
+    if args.command and args.ip:
+        if not args.config_path:
+            args.config_path = "/etc/port-monitor/config.yaml"
+        engine = PortSentinel(args.config_path)
+        if args.command == "ban":
+            cmd_ban(engine, args.ip)
+        elif args.command == "unban":
+            cmd_unban(engine, args.ip)
+        engine.db.close()
+    elif args.config_path:
+        engine = PortSentinel(args.config_path)
+        engine.start()
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
