@@ -260,9 +260,19 @@ pacman -S python sqlite curl iptables
 ### 一键安装
 
 ```bash
-git clone https://github.com/your-username/PortSentinel.git
+# 方式一：Git 克隆
+git clone https://github.com/linjunhao024-byte/PortSentinel.git
 cd PortSentinel
 sudo bash port-monitor.sh install
+
+# 方式二：wget 直接下载（无需安装 git）
+wget -O port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor
+wget -O port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh
+chmod +x port-monitor
+sudo bash port-monitor.sh install
+
+# 方式三：一行命令（下载 + 安装一步到位）
+wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor && wget -qO port-monitor.sh https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh && chmod +x port-monitor && sudo bash port-monitor.sh install
 ```
 
 安装向导将自动引导你完成 7 步配置：
