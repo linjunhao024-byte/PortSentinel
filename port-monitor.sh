@@ -22,7 +22,7 @@ _check_deps() {
     done
 
     if ! command -v iptables &>/dev/null && ! command -v firewall-cmd &>/dev/null && ! command -v nft &>/dev/null; then
-        missing+=("iptables/firewalld/nftables [any one]")
+        missing+=("iptables/firewalld/nftables [任一]")
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
@@ -187,7 +187,7 @@ get_firewall_backend() {
         elif command -v iptables &>/dev/null; then
             echo "iptables"
         else
-            echo "unknown"
+            echo "未知"
         fi
     else
         echo "$backend"
@@ -224,7 +224,7 @@ do_install() {
     print_step "步骤 2/7: 服务器环境"
     echo -e "${CYAN}服务器环境会影响监控策略:${NC}"
     echo ""
-    echo -e "  ${YELLOW}Cloud Server${NC} [Aliyun/Tencent/Huawei]:"
+    echo -e "  ${YELLOW}云服务器${NC} [阿里云/腾讯云/华为云]:"
     echo -e "    - 内网流量: 健康检查、云盾扫描、负载均衡探针等"
     echo -e "    - 建议: 忽略内网IP，只监控外网攻击，避免误报"
     echo ""
@@ -233,7 +233,7 @@ do_install() {
     echo -e "    - 可以监控所有流量"
     echo ""
 
-    server_env=$(ask_choice "服务器环境" "Cloud Server [Aliyun/Tencent/Huawei]" "Standalone Server/VPS" "Custom")
+    server_env=$(ask_choice "服务器环境" "云服务器 [阿里云/腾讯云/华为云]" "独立服务器/VPS" "自定义配置")
     case $server_env in
         1) MONITOR_MODE="cloud"; IGNORE_INTERNAL="y" ;;
         2) MONITOR_MODE="standalone"; IGNORE_INTERNAL="n" ;;
@@ -250,8 +250,8 @@ do_install() {
     if [ "$(ask_yn "启用 Telegram 告警？" "n")" = "y" ]; then
         ENABLE_TELEGRAM="y"
         while true; do
-            TELEGRAM_BOT_TOKEN=$(ask "Bot Token")
-            TELEGRAM_CHAT_ID=$(ask "Chat ID")
+            TELEGRAM_BOT_TOKEN=$(ask "机器人 Token")
+            TELEGRAM_CHAT_ID=$(ask "聊天 ID")
             echo -e "${CYAN}正在验证 Telegram 连接...${NC}"
             local tg_resp
             tg_resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -276,7 +276,7 @@ do_install() {
     if [ "$(ask_yn "启用钉钉告警？" "n")" = "y" ]; then
         ENABLE_DINGTALK="y"
         while true; do
-            DINGTALK_WEBHOOK=$(ask "Webhook URL")
+            DINGTALK_WEBHOOK=$(ask "Webhook 地址")
             DINGTALK_SECRET=$(ask_optional "签名密钥(可选)" "")
             echo -e "${CYAN}正在验证钉钉连接...${NC}"
             local ding_url="$DINGTALK_WEBHOOK"
@@ -310,7 +310,7 @@ do_install() {
     if [ "$(ask_yn "启用邮件告警？" "n")" = "y" ]; then
         ENABLE_EMAIL="y"
         while true; do
-            provider=$(ask_choice "邮件服务商" "QQ邮箱" "163邮箱" "Gmail" "自定义")
+            provider=$(ask_choice "邮件服务商" "QQ邮箱" "163邮箱" "谷歌邮箱" "自定义")
             case $provider in
                 1) EMAIL_HOST="smtp.qq.com"; EMAIL_PORT="465" ;;
                 2) EMAIL_HOST="smtp.163.com"; EMAIL_PORT="465" ;;
@@ -849,7 +849,7 @@ do_test_alert() {
     fi
 
     local hostname
-    hostname=$(hostname 2>/dev/null || echo "unknown")
+    hostname=$(hostname 2>/dev/null || echo "未知")
     local now
     now=$(date '+%Y-%m-%d %H:%M:%S')
     local test_msg="🧪 PortSentinel 告警测试\n\n主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
@@ -1007,7 +1007,7 @@ _report_query() {
 _report_format() {
     local period_label="$1"
     local hostname
-    hostname=$(hostname 2>/dev/null || echo "unknown")
+    hostname=$(hostname 2>/dev/null || echo "未知")
     local now
     now=$(date '+%Y-%m-%d %H:%M:%S')
 
@@ -1049,7 +1049,7 @@ _report_send() {
     [ ! -f "$config_file" ] && error "配置文件不存在" && return 1
 
     local hostname
-    hostname=$(hostname 2>/dev/null || echo "unknown")
+    hostname=$(hostname 2>/dev/null || echo "未知")
     local tg_section dingtalk_section email_section
     tg_section=$(sed -n '/^  telegram:/,/^  [a-z]/p' "$config_file")
     dingtalk_section=$(sed -n '/^  dingtalk:/,/^  [a-z]/p' "$config_file")
@@ -1409,7 +1409,7 @@ do_health_check() {
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         local pid
         pid=$(pgrep -x "port-monitor" || true)
-        info "运行中 (PID: ${pid:-unknown})"
+        info "运行中 [PID: ${pid:-未知}]"
     else
         warn "服务未运行"
         issues=$((issues + 1))
@@ -1428,7 +1428,7 @@ do_health_check() {
     echo -e "  ${CYAN}[3/8]${NC} 配置文件..."
     if [ -f "$CONFIG_FILE" ]; then
         local perm
-        perm=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || echo "unknown")
+        perm=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || echo "未知")
         if [ "$perm" = "600" ]; then
             info "存在，权限 ${perm} ✓"
         else
