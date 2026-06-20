@@ -79,13 +79,13 @@ _install_rollback() {
 print_banner() {
     clear
     echo -e "${BLUE}${BOLD}"
-    echo "╔═══════════════════════════════════════════════════════════════╗"
-    echo "║                                                               ║"
-    echo "║          🛡️  端口安全监控管理系统  🛡️                         ║"
-    echo "║                                                               ║"
-    echo "║     检测端口扫描 | 防御暴力破解 | 自动封禁攻击IP             ║"
-    echo "║                                                               ║"
-    echo "╚═══════════════════════════════════════════════════════════════╝"
+    printf '%s\n' "╔═══════════════════════════════════════════════════════════════╗"
+    printf '%s\n' "║                                                               ║"
+    printf '%s\n' "║            端口安全监控管理系统                               ║"
+    printf '%s\n' "║                                                               ║"
+    printf '%s\n' "║       检测端口扫描 | 防御暴力破解 | 自动封禁攻击IP           ║"
+    printf '%s\n' "║                                                               ║"
+    printf '%s\n' "╚═══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
 
@@ -196,7 +196,7 @@ get_firewall_backend() {
 
 do_install() {
     print_banner
-    echo -e "${CYAN}欢迎使用安装向导，将引导你完成配置${NC}\n"
+    echo -e "${CYAN}${BOLD}安装向导${NC} - 4 步完成部署\n"
 
     check_root
 
@@ -208,309 +208,192 @@ do_install() {
     fi
 
     trap _install_rollback ERR INT TERM
+    SHORTCUT="pm"
 
-    print_step "步骤 1/7: 安装路径"
-    use_default=$(ask_yn "使用默认路径？(程序:/usr/local/bin 配置:/etc/port-monitor)" "y")
-    if [ "$use_default" = "n" ]; then
-        INSTALL_DIR=$(ask "程序目录" "$INSTALL_DIR")
-        CONFIG_DIR=$(ask "配置目录" "$CONFIG_DIR")
-        DATA_DIR=$(ask "数据目录" "$DATA_DIR")
-        LOG_DIR=$(ask "日志目录" "$LOG_DIR")
-        CONFIG_FILE="${CONFIG_DIR}/config.yaml"
-        SHORTCUT_FILE="${CONFIG_DIR}/.shortcut_name"
-    fi
-    info "路径已配置"
-
-    print_step "步骤 2/7: 服务器环境"
-    echo -e "${CYAN}服务器环境会影响监控策略:${NC}"
+    # ── 步骤 1: 服务器环境 ──
+    print_step "步骤 1/4: 服务器环境"
+    echo -e "  ${YELLOW}[1]${NC} 云服务器 - 自动忽略内网流量，避免误报"
+    echo -e "  ${YELLOW}[2]${NC} 独立服务器/VPS - 监控全部流量"
     echo ""
-    echo -e "  ${YELLOW}云服务器${NC} [阿里云/腾讯云/华为云]:"
-    echo -e "    - 内网流量: 健康检查、云盾扫描、负载均衡探针等"
-    echo -e "    - 建议: 忽略内网IP，只监控外网攻击，避免误报"
-    echo ""
-    echo -e "  ${YELLOW}独立服务器/VPS${NC}:"
-    echo -e "    - 内网流量较少"
-    echo -e "    - 可以监控所有流量"
-    echo ""
-
-    server_env=$(ask_choice "服务器环境" "云服务器 [阿里云/腾讯云/华为云]" "独立服务器/VPS" "自定义配置")
-    case $server_env in
+    local env_choice
+    env_choice=$(ask_choice "请选择" "云服务器 [阿里云/腾讯云/华为云]" "独立服务器/VPS")
+    case $env_choice in
         1) MONITOR_MODE="cloud"; IGNORE_INTERNAL="y" ;;
         2) MONITOR_MODE="standalone"; IGNORE_INTERNAL="n" ;;
-        3) MONITOR_MODE="custom"; IGNORE_INTERNAL=$(ask_yn "是否忽略内网IP流量？" "y") ;;
     esac
-    info "服务器环境已配置: ${MONITOR_MODE}"
 
-    print_step "步骤 3/7: 告警配置"
+    BAN_METHOD="iptables"
+    ENABLE_AUTO_BAN="y"
+    SCAN_BAN_DURATION="1h"
+    BRUTE_BAN_DURATION="24h"
+    SCAN_THRESHOLD=20
+    BRUTE_THRESHOLD=5
+    SSH_PORT="22"
+    info "服务器环境: ${MONITOR_MODE}"
+
+    # ── 步骤 2: 告警通道 ──
+    print_step "步骤 2/4: 告警通道"
     ENABLE_TELEGRAM="n"
     ENABLE_DINGTALK="n"
     ENABLE_EMAIL="n"
 
-    # Telegram
-    if [ "$(ask_yn "启用 Telegram 告警？" "n")" = "y" ]; then
-        ENABLE_TELEGRAM="y"
-        while true; do
-            TELEGRAM_BOT_TOKEN=$(ask "机器人 Token")
-            TELEGRAM_CHAT_ID=$(ask "聊天 ID")
-            echo -e "${CYAN}正在验证 Telegram 连接...${NC}"
-            local tg_resp
-            tg_resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="$TELEGRAM_CHAT_ID" \
-                -d text="🧪 PortSentinel 告警测试成功" \
-                --connect-timeout 10 --max-time 15 2>&1)
-            if echo "$tg_resp" | grep -q '"ok":true'; then
-                info "Telegram 验证成功"
-                break
-            else
-                error "Telegram 发送失败: $(echo "$tg_resp" | grep -o '"description":"[^"]*"' || echo "$tg_resp")"
-                if [ "$(ask_yn "重新输入凭据？" "y")" != "y" ]; then
-                    ENABLE_TELEGRAM="n"
-                    warn "已跳过 Telegram"
-                    break
+    if [ "$(ask_yn "是否配置告警通知？" "y")" = "y" ]; then
+        echo -e "  ${YELLOW}[1]${NC} Telegram"
+        echo -e "  ${YELLOW}[2]${NC} 钉钉"
+        echo -e "  ${YELLOW}[3]${NC} 邮件"
+        echo -e "  ${YELLOW}[4]${NC} 全部"
+        echo ""
+        local alert_choice
+        alert_choice=$(ask_choice "选择告警通道" "Telegram" "钉钉" "邮件" "全部配置")
+
+        _setup_telegram() {
+            ENABLE_TELEGRAM="y"
+            while true; do
+                TELEGRAM_BOT_TOKEN=$(ask "机器人 Token")
+                TELEGRAM_CHAT_ID=$(ask "聊天 ID")
+                echo -e "${CYAN}验证中...${NC}" >&2
+                local tg_resp
+                tg_resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                    -d chat_id="$TELEGRAM_CHAT_ID" \
+                    -d text="🧪 PortSentinel 告警测试" \
+                    --connect-timeout 10 --max-time 15 2>&1)
+                if echo "$tg_resp" | grep -q '"ok":true'; then
+                    info "Telegram 验证成功"
+                    return
+                else
+                    error "发送失败: $(echo "$tg_resp" | grep -o '"description":"[^"]*"' || echo "$tg_resp")"
+                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_TELEGRAM="n" && warn "已跳过" && return
                 fi
-            fi
-        done
-    fi
+            done
+        }
 
-    # 钉钉
-    if [ "$(ask_yn "启用钉钉告警？" "n")" = "y" ]; then
-        ENABLE_DINGTALK="y"
-        while true; do
-            DINGTALK_WEBHOOK=$(ask "Webhook 地址")
-            DINGTALK_SECRET=$(ask_optional "签名密钥(可选)" "")
-            echo -e "${CYAN}正在验证钉钉连接...${NC}"
-            local ding_url="$DINGTALK_WEBHOOK"
-            if [ -n "$DINGTALK_SECRET" ]; then
-                local ts_ms sign_str sign
-                ts_ms=$(date +%s%3N)
-                sign_str="${ts_ms}\n${DINGTALK_SECRET}"
-                sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | sed 's/+/-/g;s/\//_/g;s/=//g')
-                ding_url="${DINGTALK_WEBHOOK}&timestamp=${ts_ms}&sign=${sign}"
-            fi
-            local ding_resp
-            ding_resp=$(curl -s -X POST "$ding_url" \
-                -H 'Content-Type: application/json' \
-                -d '{"msgtype":"text","text":{"content":"🧪 PortSentinel 告警测试成功"}}' \
-                --connect-timeout 10 --max-time 15 2>&1)
-            if echo "$ding_resp" | grep -q '"errcode":0'; then
-                info "钉钉验证成功"
-                break
-            else
-                error "钉钉发送失败: $ding_resp"
-                if [ "$(ask_yn "重新输入凭据？" "y")" != "y" ]; then
-                    ENABLE_DINGTALK="n"
-                    warn "已跳过钉钉"
-                    break
+        _setup_dingtalk() {
+            ENABLE_DINGTALK="y"
+            while true; do
+                DINGTALK_WEBHOOK=$(ask "Webhook 地址")
+                DINGTALK_SECRET=$(ask_optional "签名密钥 [可选]" "")
+                echo -e "${CYAN}验证中...${NC}" >&2
+                local ding_url="$DINGTALK_WEBHOOK"
+                if [ -n "$DINGTALK_SECRET" ]; then
+                    local ts_ms sign_str sign
+                    ts_ms=$(date +%s%3N)
+                    sign_str="${ts_ms}\n${DINGTALK_SECRET}"
+                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | sed 's/+/-/g;s/\//_/g;s/=//g')
+                    ding_url="${DINGTALK_WEBHOOK}&timestamp=${ts_ms}&sign=${sign}"
                 fi
-            fi
-        done
-    fi
-
-    # 邮件
-    if [ "$(ask_yn "启用邮件告警？" "n")" = "y" ]; then
-        ENABLE_EMAIL="y"
-        while true; do
-            provider=$(ask_choice "邮件服务商" "QQ邮箱" "163邮箱" "谷歌邮箱" "自定义")
-            case $provider in
-                1) EMAIL_HOST="smtp.qq.com"; EMAIL_PORT="465" ;;
-                2) EMAIL_HOST="smtp.163.com"; EMAIL_PORT="465" ;;
-                3) EMAIL_HOST="smtp.gmail.com"; EMAIL_PORT="587" ;;
-                4) EMAIL_HOST=$(ask "SMTP服务器"); EMAIL_PORT=$(ask "端口" "465") ;;
-            esac
-            EMAIL_USER=$(ask "发件人邮箱")
-            EMAIL_PASS=$(ask "密码/授权码")
-            EMAIL_TO=$(ask "收件人邮箱")
-            echo -e "${CYAN}正在验证邮件连接...${NC}"
-            local curl_proto="smtp"
-            [ "$EMAIL_PORT" = "465" ] && curl_proto="smtps"
-            local mail_resp
-            mail_resp=$(echo -e "Subject: PortSentinel 告警测试\nContent-Type: text/plain; charset=UTF-8\n\n🧪 PortSentinel 告警测试成功" | \
-                curl -s --url "${curl_proto}://${EMAIL_HOST}:${EMAIL_PORT}" \
-                --ssl-reqd \
-                --mail-from "$EMAIL_USER" \
-                --mail-rcpt "$EMAIL_TO" \
-                --user "${EMAIL_USER}:${EMAIL_PASS}" \
-                --connect-timeout 10 --max-time 15 \
-                -T - 2>&1)
-            if [ -z "$mail_resp" ] || ! echo "$mail_resp" | grep -qi 'error\|denied\|fail\|535\|550\|553'; then
-                info "邮件验证成功"
-                break
-            else
-                error "邮件发送失败: $mail_resp"
-                if [ "$(ask_yn "重新输入凭据？" "y")" != "y" ]; then
-                    ENABLE_EMAIL="n"
-                    warn "已跳过邮件"
-                    break
+                local ding_resp
+                ding_resp=$(curl -s -X POST "$ding_url" \
+                    -H 'Content-Type: application/json' \
+                    -d '{"msgtype":"text","text":{"content":"🧪 PortSentinel 告警测试"}}' \
+                    --connect-timeout 10 --max-time 15 2>&1)
+                if echo "$ding_resp" | grep -q '"errcode":0'; then
+                    info "钉钉验证成功"
+                    return
+                else
+                    error "发送失败: $ding_resp"
+                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_DINGTALK="n" && warn "已跳过" && return
                 fi
-            fi
-        done
-    fi
-    info "告警配置完成"
+            done
+        }
 
-    print_step "步骤 4/7: 封禁策略"
-    method=$(ask_choice "封禁方式" "iptables(推荐)" "firewalld" "nftables" "仅告警不封禁")
-    case $method in
-        1) BAN_METHOD="iptables" ;;
-        2) BAN_METHOD="firewalld" ;;
-        3) BAN_METHOD="nftables" ;;
-        4) BAN_METHOD="none" ;;
-    esac
+        _setup_email() {
+            ENABLE_EMAIL="y"
+            while true; do
+                local provider
+                provider=$(ask_choice "邮件服务商" "QQ邮箱" "163邮箱" "谷歌邮箱" "自定义")
+                case $provider in
+                    1) EMAIL_HOST="smtp.qq.com"; EMAIL_PORT="465" ;;
+                    2) EMAIL_HOST="smtp.163.com"; EMAIL_PORT="465" ;;
+                    3) EMAIL_HOST="smtp.gmail.com"; EMAIL_PORT="587" ;;
+                    4) EMAIL_HOST=$(ask "SMTP服务器"); EMAIL_PORT=$(ask "端口" "465") ;;
+                esac
+                EMAIL_USER=$(ask "发件人邮箱")
+                EMAIL_PASS=$(ask "密码/授权码")
+                EMAIL_TO=$(ask "收件人邮箱")
+                echo -e "${CYAN}验证中...${NC}" >&2
+                local curl_proto="smtp"
+                [ "$EMAIL_PORT" = "465" ] && curl_proto="smtps"
+                local mail_resp
+                mail_resp=$(echo -e "Subject: PortSentinel 告警测试\nContent-Type: text/plain; charset=UTF-8\n\n🧪 PortSentinel 告警测试" | \
+                    curl -s --url "${curl_proto}://${EMAIL_HOST}:${EMAIL_PORT}" \
+                    --ssl-reqd --mail-from "$EMAIL_USER" --mail-rcpt "$EMAIL_TO" \
+                    --user "${EMAIL_USER}:${EMAIL_PASS}" \
+                    --connect-timeout 10 --max-time 15 -T - 2>&1)
+                if [ -z "$mail_resp" ] || ! echo "$mail_resp" | grep -qi 'error\|denied\|fail\|535\|550\|553'; then
+                    info "邮件验证成功"
+                    return
+                else
+                    error "发送失败: $mail_resp"
+                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_EMAIL="n" && warn "已跳过" && return
+                fi
+            done
+        }
 
-    ENABLE_AUTO_BAN="y"
-    if [ "$BAN_METHOD" != "none" ]; then
-        ENABLE_AUTO_BAN=$(ask_yn "启用自动封禁？" "y")
-        if [ "$ENABLE_AUTO_BAN" = "y" ]; then
-            echo ""
-            echo -e "${CYAN}封禁时长配置:${NC}"
-            echo -e "  ${YELLOW}端口扫描${NC}: 攻击者短时间内扫描大量端口"
-            echo -e "  ${YELLOW}暴力破解${NC}: 攻击者反复尝试登录敏感服务(SSH/MySQL等)"
-            echo ""
-
-            ban_duration_choice=$(ask_choice "端口扫描封禁时长" "30分钟" "1小时(推荐)" "6小时" "24小时" "自定义")
-            case $ban_duration_choice in
-                1) SCAN_BAN_DURATION="30m" ;;
-                2) SCAN_BAN_DURATION="1h" ;;
-                3) SCAN_BAN_DURATION="6h" ;;
-                4) SCAN_BAN_DURATION="24h" ;;
-                5) SCAN_BAN_DURATION=$(ask "输入时长(如: 30m, 1h, 24h)" "1h") ;;
-            esac
-
-            brute_duration_choice=$(ask_choice "暴力破解封禁时长" "1小时" "6小时" "24小时(推荐)" "7天" "永久封禁" "自定义")
-            case $brute_duration_choice in
-                1) BRUTE_BAN_DURATION="1h" ;;
-                2) BRUTE_BAN_DURATION="6h" ;;
-                3) BRUTE_BAN_DURATION="24h" ;;
-                4) BRUTE_BAN_DURATION="168h" ;;
-                5) BRUTE_BAN_DURATION="permanent" ;;
-                6) BRUTE_BAN_DURATION=$(ask "输入时长(如: 1h, 24h, 168h)" "24h") ;;
-            esac
-        fi
-        ADMIN_IP=$(ask_optional "管理IP(白名单，防止误封)" "")
+        case $alert_choice in
+            1) _setup_telegram ;;
+            2) _setup_dingtalk ;;
+            3) _setup_email ;;
+            4) _setup_telegram; _setup_dingtalk; _setup_email ;;
+        esac
     else
-        ENABLE_AUTO_BAN="n"
-        SCAN_BAN_DURATION="1h"
-        BRUTE_BAN_DURATION="24h"
+        info "已跳过告警配置"
     fi
-    info "封禁策略已配置"
 
-    print_step "步骤 5/7: 检测规则"
-    echo -e "${CYAN}检测灵敏度说明:${NC}"
-    echo -e "  ${YELLOW}严格${NC}: 10个端口/10秒 = 端口扫描告警, 3次SSH连接/分钟 = 暴力破解告警"
-    echo -e "  ${YELLOW}正常${NC}: 20个端口/10秒 = 端口扫描告警, 5次SSH连接/分钟 = 暴力破解告警"
-    echo -e "  ${YELLOW}宽松${NC}: 50个端口/10秒 = 端口扫描告警, 10次SSH连接/分钟 = 暴力破解告警"
+    # ── 步骤 3: 检测规则 ──
+    print_step "步骤 3/4: 检测规则"
+    echo -e "  ${YELLOW}[1]${NC} 严格 - 10端口/10秒, 3次SSH/分钟"
+    echo -e "  ${YELLOW}[2]${NC} 正常 - 20端口/10秒, 5次SSH/分钟 [推荐]"
+    echo -e "  ${YELLOW}[3]${NC} 宽松 - 50端口/10秒, 10次SSH/分钟"
     echo ""
-
-    sensitivity=$(ask_choice "检测灵敏度" "严格 - 10端口/10秒, 3次SSH/分钟" "正常 - 20端口/10秒, 5次SSH/分钟(推荐)" "宽松 - 50端口/10秒, 10次SSH/分钟" "自定义")
+    local sensitivity
+    sensitivity=$(ask_choice "检测灵敏度" "严格" "正常 [推荐]" "宽松")
     case $sensitivity in
         1) SCAN_THRESHOLD=10; BRUTE_THRESHOLD=3 ;;
         2) SCAN_THRESHOLD=20; BRUTE_THRESHOLD=5 ;;
         3) SCAN_THRESHOLD=50; BRUTE_THRESHOLD=10 ;;
-        4) SCAN_THRESHOLD=$(ask "端口扫描阈值(多少个端口/10秒触发告警)" "20"); BRUTE_THRESHOLD=$(ask "SSH破解阈值(多少次连接/分钟触发告警)" "5") ;;
     esac
-    info "检测规则已配置: 端口扫描=${SCAN_THRESHOLD}个/10秒, SSH破解=${BRUTE_THRESHOLD}次/分钟"
+    info "灵敏度: 端口扫描=${SCAN_THRESHOLD}/10s, SSH暴破=${BRUTE_THRESHOLD}/min"
 
-    # 自定义 SSH 端口
+    # ── 步骤 4: 确认安装 ──
+    print_step "步骤 4/4: 确认安装"
+    echo -e "  服务器: $([ "$MONITOR_MODE" = "cloud" ] && echo -e "${GREEN}云服务器${NC}" || echo -e "${GREEN}独立服务器${NC}")"
+    echo -e "  告警: $([ "$ENABLE_TELEGRAM" = "y" ] && echo -n "TG " ; [ "$ENABLE_DINGTALK" = "y" ] && echo -n "钉钉 " ; [ "$ENABLE_EMAIL" = "y" ] && echo -n "邮件 " ; [ "$ENABLE_TELEGRAM" = "n" ] && [ "$ENABLE_DINGTALK" = "n" ] && [ "$ENABLE_EMAIL" = "n" ] && echo -n "未配置")"
     echo ""
-    SSH_PORT=$(ask "SSH 端口[用于暴力破解检测]" "22")
-    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
-        warn "端口号无效，使用默认值 22"
-        SSH_PORT="22"
-    fi
-    info "SSH 端口已设置: :${SSH_PORT}"
+    [ "$(ask_yn "确认安装？" "y")" != "y" ] && warn "已取消" && trap - ERR INT TERM && exit 0
 
-    print_step "步骤 6/7: 快捷键设置"
-    echo -e "${CYAN}设置快捷命令，方便快速打开管理面板${NC}"
-    echo -e "${YELLOW}提示: 设置后可在终端直接输入快捷键打开管理面板${NC}"
-    echo ""
-    SHORTCUT=$(ask "设置快捷命令名" "pm")
-    info "快捷命令已设置为: ${SHORTCUT}"
-
-    print_step "步骤 7/7: 确认安装"
-    echo -e "${CYAN}配置摘要:${NC}"
-    echo -e "  路径: ${INSTALL_DIR}"
-    echo -e "  快捷键: ${GREEN}${SHORTCUT}${NC}"
-    echo -e "  服务器: $([ "$MONITOR_MODE" = "cloud" ] && echo -e "${GREEN}国内云服务器${NC}" || echo -e "${GREEN}独立服务器${NC}")"
-    echo -e "  Telegram: $([ "$ENABLE_TELEGRAM" = "y" ] && echo -e "${GREEN}已启用${NC}" || echo -e "${RED}未启用${NC}")"
-    echo -e "  钉钉: $([ "$ENABLE_DINGTALK" = "y" ] && echo -e "${GREEN}已启用${NC}" || echo -e "${RED}未启用${NC}")"
-    echo -e "  邮件: $([ "$ENABLE_EMAIL" = "y" ] && echo -e "${GREEN}已启用${NC}" || echo -e "${RED}未启用${NC}")"
-    echo -e "  封禁方式: ${BAN_METHOD}"
-    if [ "$ENABLE_AUTO_BAN" = "y" ]; then
-        if [ "$BRUTE_BAN_DURATION" = "permanent" ]; then
-            echo -e "  封禁时长: 端口扫描=${GREEN}${SCAN_BAN_DURATION}${NC}, 暴力破解=${RED}永久封禁${NC}"
-        else
-            echo -e "  封禁时长: 端口扫描=${GREEN}${SCAN_BAN_DURATION}${NC}, 暴力破解=${GREEN}${BRUTE_BAN_DURATION}${NC}"
-        fi
-    else
-        echo -e "  自动封禁: ${RED}未启用${NC}"
-    fi
-    echo -e "  SSH端口: :${SSH_PORT:-22}"
-    echo -e "  白名单: ${ADMIN_IP:-无}"
-    if [ "$IGNORE_INTERNAL" = "y" ]; then
-        echo -e "  内网IP: ${GREEN}已忽略[避免云平台误报]${NC}"
-    fi
-    echo ""
-
-    if [ "$(ask_yn "确认安装？" "y")" != "y" ]; then
-        warn "已取消"
-        trap - ERR INT TERM
-        exit 0
-    fi
-
-    print_step "正在安装..."
+    echo -e "\n${CYAN}正在部署...${NC}"
 
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     _ROLLBACK_ITEMS+=("$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR")
-
     install -m 755 ./port-monitor "$INSTALL_DIR/port-monitor"
     _ROLLBACK_ITEMS+=("$INSTALL_DIR/port-monitor")
-
     generate_config
-
-    # 仅 root 可读写，防止凭证明文泄露
     chmod 600 "$CONFIG_FILE"
     _ROLLBACK_ITEMS+=("$CONFIG_FILE")
-
-    # 持久化快捷命令名，供卸载时精确清理
     echo "$SHORTCUT" > "$SHORTCUT_FILE"
-
     create_service
     _ROLLBACK_ITEMS+=("/etc/systemd/system/${SERVICE_NAME}.service")
-
     create_logrotate
-
     cp "$0" "/usr/local/bin/port-monitor-ctl"
     chmod +x "/usr/local/bin/port-monitor-ctl"
     ln -sf "/usr/local/bin/port-monitor-ctl" "/usr/local/bin/${SHORTCUT}"
-
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
-
-    # 安装成功，清除回滚 trap
     trap - ERR INT TERM
-    info "安装完成！"
+    info "部署完成"
 
     echo ""
-    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}${BOLD}  安装成功！${NC}"
-    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "  ${CYAN}快捷命令:${NC} ${GREEN}${SHORTCUT}${NC}"
-    echo -e "  ${CYAN}使用方法:${NC} 在终端输入 ${GREEN}${SHORTCUT}${NC} 回车即可打开管理面板"
+    echo -e "  ${GREEN}快捷命令:${NC} pm"
+    echo -e "  ${GREEN}使用方法:${NC} 终端输入 pm 即可打开管理面板"
     echo ""
 
     if [ "$(ask_yn "现在启动服务？" "y")" = "y" ]; then
         systemctl start "$SERVICE_NAME"
-        if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
-            info "服务已启动"
-        else
-            error "启动失败，查看日志: journalctl -u $SERVICE_NAME -n 20"
-        fi
+        systemctl is-active "$SERVICE_NAME" &>/dev/null && info "服务已启动" || error "启动失败: journalctl -u $SERVICE_NAME -n 20"
     fi
 
     echo ""
-    if [ "$(ask_yn "是否现在进入管理面板？" "y")" = "y" ]; then
-        show_menu_loop
-    fi
+    [ "$(ask_yn "进入管理面板？" "y")" = "y" ] && show_menu_loop
 }
 
 # YAML 安全转义：对可能含特殊字符的值进行转义，防止解析器崩溃
@@ -1600,24 +1483,52 @@ do_cleanup() {
 }
 
 show_menu() {
+    clear
+
+    # ── 顶部状态栏 ──
+    local hostname_str uptime_str cpu_str mem_str
+    hostname_str=$(hostname 2>/dev/null || echo "unknown")
+    uptime_str=$(uptime -p 2>/dev/null | sed 's/up //' || uptime 2>/dev/null | awk -F'up ' '{print $2}' | awk -F',' '{print $1}' || echo "?")
+    cpu_str=$(awk '{u=$2+$4; t=$2+$4+$5; if(t>0) printf "%.0f%%", u*100/t}' /proc/stat 2>/dev/null || echo "?")
+    mem_str=$(free 2>/dev/null | awk '/Mem:/{printf "%.0f%%", $3/$2*100}' || echo "?")
+
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    printf "${BOLD}${CYAN}║${NC}  ${BOLD}PortSentinel${NC} v${PORTMONITOR_VERSION}  " && printf "${CYAN}│${NC}  主机: ${GREEN}%-16s${NC}" "$hostname_str" && printf "${CYAN}│${NC} 运行: ${GREEN}%-12s${NC} ${CYAN}║${NC}\n" "$uptime_str"
+    printf "${BOLD}${CYAN}║${NC}  " && printf "CPU: ${YELLOW}%-5s${NC} " "$cpu_str" && printf "${CYAN}│${NC} 内存: ${YELLOW}%-5s${NC} " "$mem_str"
+
+    # 服务状态
+    if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+        printf "${CYAN}│${NC} 状态: ${GREEN}运行中${NC}"
+    else
+        printf "${CYAN}│${NC} 状态: ${RED}已停止${NC}"
+    fi
+    printf "     ${CYAN}║${NC}\n"
+
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
     if systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
-        print_banner
-        echo -e "${CYAN}${BOLD}管理菜单:${NC}\n"
-        echo -e "  ${YELLOW}[1]${NC}  启动服务        ${YELLOW}[10]${NC} 手动解封"
-        echo -e "  ${YELLOW}[2]${NC}  停止服务        ${YELLOW}[11]${NC} IP 溯源查询"
-        echo -e "  ${YELLOW}[3]${NC}  重启服务        ${YELLOW}[12]${NC} 实时攻击监控"
-        echo -e "  ${YELLOW}[4]${NC}  查看状态        ${YELLOW}[13]${NC} 测试告警"
-        echo -e "  ${YELLOW}[5]${NC}  查看统计        ${YELLOW}[14]${NC} 报告中心"
-        echo -e "  ${YELLOW}[6]${NC}  编辑配置        ${YELLOW}[15]${NC} 备份配置"
-        echo -e "  ${YELLOW}[7]${NC}  查看日志        ${YELLOW}[16]${NC} 健康检查"
-        echo -e "  ${YELLOW}[8]${NC}  查看封禁IP      ${YELLOW}[17]${NC} 日志清理"
-        echo -e "  ${YELLOW}[9]${NC}  更新程序        ${YELLOW}[0]${NC}  退出"
+        # ── 服务控制 ──
+        echo -e "  ${BOLD}${GREEN}服务控制${NC}"
+        echo -e "  ${YELLOW}[ 1]${NC} 启动服务       ${YELLOW}[ 2]${NC} 停止服务       ${YELLOW}[ 3]${NC} 重启服务"
+        echo ""
+        # ── 监控查询 ──
+        echo -e "  ${BOLD}${CYAN}监控查询${NC}"
+        echo -e "  ${YELLOW}[ 4]${NC} 查看状态       ${YELLOW}[ 5]${NC} 查看统计       ${YELLOW}[ 6]${NC} 查看封禁IP"
+        echo -e "  ${YELLOW}[ 7]${NC} 查看日志       ${YELLOW}[ 8]${NC} 实时监控       ${YELLOW}[ 9]${NC} IP溯源查询"
+        echo ""
+        # ── 告警报告 ──
+        echo -e "  ${BOLD}${YELLOW}告警报告${NC}"
+        echo -e "  ${YELLOW}[10]${NC} 测试告警       ${YELLOW}[11]${NC} 报告中心       ${YELLOW}[12]${NC} 健康检查"
+        echo ""
+        # ── 系统维护 ──
+        echo -e "  ${BOLD}${RED}系统维护${NC}"
+        echo -e "  ${YELLOW}[13]${NC} 手动解封       ${YELLOW}[14]${NC} 编辑配置       ${YELLOW}[15]${NC} 更新程序"
+        echo -e "  ${YELLOW}[16]${NC} 备份配置       ${YELLOW}[17]${NC} 日志清理       ${YELLOW}[ 0]${NC} 退出"
         echo ""
     else
-        print_banner
-        echo -e "${CYAN}${BOLD}安装菜单:${NC}\n"
-        echo -e "  ${YELLOW}[1]${NC}  安装程序"
-        echo -e "  ${YELLOW}[0]${NC}  退出"
+        echo -e "  ${BOLD}${GREEN}安装${NC}"
+        echo -e "  ${YELLOW}[1]${NC} 安装程序       ${YELLOW}[0]${NC} 退出"
         echo ""
     fi
 }
@@ -1636,17 +1547,17 @@ show_menu_loop() {
                 3)  do_restart ;;
                 4)  do_status ;;
                 5)  do_stats ;;
-                6)  do_edit_config ;;
+                6)  do_view_bans ;;
                 7)  do_logs ;;
-                8)  do_view_bans ;;
-                9)  do_update ;;
-                10) do_unban ;;
-                11) do_ip_lookup ;;
-                12) do_live_monitor ;;
-                13) do_test_alert ;;
-                14) do_report ;;
-                15) do_backup ;;
-                16) do_health_check ;;
+                8)  do_live_monitor ;;
+                9)  do_ip_lookup ;;
+                10) do_test_alert ;;
+                11) do_report ;;
+                12) do_health_check ;;
+                13) do_unban ;;
+                14) do_edit_config ;;
+                15) do_update ;;
+                16) do_backup ;;
                 17) do_cleanup ;;
                 0)  echo -e "${GREEN}退出${NC}"; exit 0 ;;
                 *)  error "无效选择" ;;
