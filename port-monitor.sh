@@ -17,7 +17,7 @@ _check_deps() {
     local bash_major="${BASH_VERSINFO[0]}"
     [ "$bash_major" -lt 4 ] && echo -e "\033[0;31m[✗]\033[0m 需要 bash 4.0+[当前: ${BASH_VERSION}]" && exit 1
 
-    for cmd in python3 systemctl sqlite3 curl awk sed grep tr; do
+    for cmd in python3 systemctl sqlite3 curl awk sed grep tr openssl; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
 
@@ -32,14 +32,16 @@ _check_deps() {
         done
         echo ""
         echo -e "\033[1;33m安装参考:\033[0m"
-        echo "  Debian/Ubuntu:  apt install python3 sqlite3 curl iptables"
+        echo "  Debian/Ubuntu:  apt install python3 sqlite3 curl iptables openssl"
         echo "  CentOS/RHEL:    yum install python3 sqlite curl iptables"
         echo "  Arch:           pacman -S python sqlite curl iptables"
         exit 1
     fi
 }
 
-_check_deps
+if [[ "${1:-}" != "--version" && "${1:-}" != "-v" ]]; then
+    _check_deps
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -93,9 +95,9 @@ print_step() {
     echo -e "\n${CYAN}━━━ $1 ━━━${NC}\n"
 }
 
-info() { echo -e "${GREEN}[✓]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-error() { echo -e "${RED}[✗]${NC} $1"; }
+info() { echo -e "${GREEN}[✓]${NC} $1" >&2; return 0; }
+warn() { echo -e "${YELLOW}[!]${NC} $1" >&2; return 0; }
+error() { echo -e "${RED}[✗]${NC} $1" >&2; return 0; }
 
 # 必填输入：不允许空值
 ask() {
@@ -229,6 +231,7 @@ do_install() {
     SCAN_THRESHOLD=20
     BRUTE_THRESHOLD=5
     SSH_PORT="22"
+    ADMIN_IP=""
     info "服务器环境: ${MONITOR_MODE}"
 
     # ── 步骤 2: 告警通道 ──
@@ -236,6 +239,15 @@ do_install() {
     ENABLE_TELEGRAM="n"
     ENABLE_DINGTALK="n"
     ENABLE_EMAIL="n"
+    TELEGRAM_BOT_TOKEN=""
+    TELEGRAM_CHAT_ID=""
+    DINGTALK_WEBHOOK=""
+    DINGTALK_SECRET=""
+    EMAIL_HOST=""
+    EMAIL_PORT="465"
+    EMAIL_USER=""
+    EMAIL_PASS=""
+    EMAIL_TO=""
 
     if [ "$(ask_yn "是否配置告警通知？" "y")" = "y" ]; then
         echo -e "  ${YELLOW}[1]${NC} Telegram"
@@ -388,8 +400,11 @@ do_install() {
     echo ""
 
     if [ "$(ask_yn "现在启动服务？" "y")" = "y" ]; then
-        systemctl start "$SERVICE_NAME"
-        systemctl is-active "$SERVICE_NAME" &>/dev/null && info "服务已启动" || error "启动失败: journalctl -u $SERVICE_NAME -n 20"
+        if systemctl start "$SERVICE_NAME" 2>&1; then
+            info "服务已启动"
+        else
+            error "启动失败，查看日志: journalctl -u $SERVICE_NAME -n 10 --no-pager"
+        fi
     fi
 
     echo ""
@@ -561,8 +576,11 @@ do_update() {
     info "程序文件已更新"
 
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
-        systemctl restart "$SERVICE_NAME"
-        info "服务已重启"
+        if systemctl restart "$SERVICE_NAME" 2>&1; then
+            info "服务已重启"
+        else
+            error "重启失败: journalctl -u $SERVICE_NAME -n 5 --no-pager"
+        fi
     else
         warn "服务当前未运行，跳过重启"
     fi
@@ -629,20 +647,29 @@ do_full_uninstall() {
 
 do_start() {
     check_root
-    systemctl start "$SERVICE_NAME"
-    info "服务已启动"
+    if systemctl start "$SERVICE_NAME" 2>&1; then
+        info "服务已启动"
+    else
+        error "启动失败: journalctl -u $SERVICE_NAME -n 5 --no-pager"
+    fi
 }
 
 do_stop() {
     check_root
-    systemctl stop "$SERVICE_NAME"
-    info "服务已停止"
+    if systemctl stop "$SERVICE_NAME" 2>&1; then
+        info "服务已停止"
+    else
+        error "停止失败"
+    fi
 }
 
 do_restart() {
     check_root
-    systemctl restart "$SERVICE_NAME"
-    info "服务已重启"
+    if systemctl restart "$SERVICE_NAME" 2>&1; then
+        info "服务已重启"
+    else
+        error "重启失败: journalctl -u $SERVICE_NAME -n 5 --no-pager"
+    fi
 }
 
 do_status() {
@@ -651,12 +678,12 @@ do_status() {
 
 do_logs() {
     echo -e "${YELLOW}按 Ctrl+C 退出${NC}"
-    journalctl -u "$SERVICE_NAME" -f --no-pager
+    journalctl -u "$SERVICE_NAME" -f --no-pager || true
 }
 
 do_edit_config() {
     check_root
-    ${EDITOR:-vi} "$CONFIG_FILE"
+    ${EDITOR:-vi} "$CONFIG_FILE" || true
     if [ "$(ask_yn "重启服务使配置生效？" "y")" = "y" ]; then
         do_restart
     fi
@@ -865,7 +892,7 @@ _report_query() {
     local db="${DATA_DIR}/monitor.db"
     if [ ! -f "$db" ]; then
         warn "数据库不存在: $db"
-        return 1
+        return 0
     fi
 
     local time_filter=""
@@ -929,7 +956,7 @@ _report_format() {
 _report_send() {
     local channel="$1"
     local config_file="$CONFIG_FILE"
-    [ ! -f "$config_file" ] && error "配置文件不存在" && return 1
+    if [ ! -f "$config_file" ]; then error "配置文件不存在"; return 0; fi
 
     local hostname
     hostname=$(hostname 2>/dev/null || echo "未知")
@@ -1172,8 +1199,11 @@ do_stats() {
 
 do_backup() {
     local file="port-monitor-backup-$(date +%Y%m%d%H%M%S).tar.gz"
-    tar -czf "$file" -C / etc/port-monitor var/lib/port-monitor 2>/dev/null
-    info "备份完成: $file"
+    if tar -czf "$file" -C / etc/port-monitor var/lib/port-monitor 2>/dev/null; then
+        info "备份完成: $file"
+    else
+        error "备份失败，请检查目录是否存在"
+    fi
 }
 
 # ── IP 溯源查询 ─────────────────────────────────────────────
@@ -1187,7 +1217,7 @@ do_ip_lookup() {
 
     if ! echo "$ip" | grep -qE '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'; then
         error "IP 格式不正确: $ip"
-        return 1
+        return 0
     fi
 
     echo -e "${CYAN}正在查询 ${ip} ...${NC}"
@@ -1487,8 +1517,8 @@ show_menu() {
 
     # ── 顶部状态栏 ──
     local hostname_str uptime_str cpu_str mem_str
-    hostname_str=$(hostname 2>/dev/null || echo "unknown")
-    uptime_str=$(uptime -p 2>/dev/null | sed 's/up //' || uptime 2>/dev/null | awk -F'up ' '{print $2}' | awk -F',' '{print $1}' || echo "?")
+    hostname_str=$(hostname 2>/dev/null | cut -c1-14 || echo "?")
+    uptime_str=$(uptime -p 2>/dev/null | sed 's/up //' | cut -c1-10 || uptime 2>/dev/null | awk -F'up ' '{print $2}' | awk -F',' '{print $1}' | cut -c1-10 || echo "?")
     cpu_str=$(awk '{u=$2+$4; t=$2+$4+$5; if(t>0) printf "%.0f%%", u*100/t}' /proc/stat 2>/dev/null || echo "?")
     mem_str=$(free 2>/dev/null | awk '/Mem:/{printf "%.0f%%", $3/$2*100}' || echo "?")
 
