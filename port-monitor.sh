@@ -22,7 +22,7 @@ _check_deps() {
     done
 
     if ! command -v iptables &>/dev/null && ! command -v firewall-cmd &>/dev/null && ! command -v nft &>/dev/null; then
-        missing+=("iptables/firewalld/nftables (任一)")
+        missing+=("iptables/firewalld/nftables [any one]")
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
@@ -202,7 +202,8 @@ do_install() {
 
     if [ ! -f "./port-monitor" ]; then
         error "未找到 port-monitor 可执行文件"
-        echo -e "${YELLOW}请先编译: go build -o port-monitor cmd/monitor/main.go${NC}"
+        echo -e "${YELLOW}请从 GitHub 下载:${NC}"
+        echo -e "  wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor"
         exit 1
     fi
 
@@ -1411,7 +1412,7 @@ do_health_check() {
         info "运行中 (PID: ${pid:-unknown})"
     else
         warn "服务未运行"
-        ((issues++))
+        issues=$((issues + 1))
     fi
 
     # 2. systemd 服务
@@ -1420,7 +1421,7 @@ do_health_check() {
         info "已注册并启用"
     else
         warn "服务未注册或未启用"
-        ((issues++))
+        issues=$((issues + 1))
     fi
 
     # 3. 配置文件
@@ -1432,11 +1433,11 @@ do_health_check() {
             info "存在，权限 ${perm} ✓"
         else
             warn "存在，但权限为 ${perm}（建议 600）"
-            ((issues++))
+            issues=$((issues + 1))
         fi
     else
         error "配置文件不存在: $CONFIG_FILE"
-        ((issues++))
+        issues=$((issues + 1))
     fi
 
     # 4. SQLite 数据库
@@ -1451,7 +1452,7 @@ do_health_check() {
             info "正常，${db_size}，${total} 条记录"
         else
             error "数据库损坏或表结构异常"
-            ((issues++))
+            issues=$((issues + 1))
         fi
     else
         warn "数据库文件不存在（首次运行后自动创建）"
@@ -1465,7 +1466,7 @@ do_health_check() {
         iptables)   info "iptables 可用" ;;
         firewalld)  info "firewalld 可用" ;;
         nftables)   info "nftables 可用" ;;
-        *)          error "未检测到可用的防火墙后端"; ((issues++)) ;;
+        *)          error "未检测到可用的防火墙后端"; issues=$((issues + 1)) ;;
     esac
 
     # 6. 告警通道
@@ -1487,7 +1488,7 @@ do_health_check() {
     disk_usage=$(df -h / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
     if [ -n "$disk_usage" ] && [ "$disk_usage" -gt 90 ]; then
         error "磁盘使用率 ${disk_usage}%（>90%）"
-        ((issues++))
+        issues=$((issues + 1))
     else
         info "磁盘使用率 ${disk_usage:-?}%"
     fi
