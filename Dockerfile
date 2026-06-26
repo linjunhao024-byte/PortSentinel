@@ -1,8 +1,9 @@
 FROM python:3.11-alpine
 
-LABEL maintainer="PortSentinel"
-LABEL description="PortSentinel - 端口安全监控检测引擎"
+LABEL maintainer="LIN"
+LABEL description="LIN-PortSentinel - Port Security Monitor Engine"
 LABEL version="1.0.2"
+LABEL org.opencontainers.image.source="https://github.com/linjunhao024-byte/PortSentinel"
 
 # 安装系统依赖
 RUN apk add --no-cache \

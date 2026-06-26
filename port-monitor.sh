@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# 端口安全监控 - 一体化管理脚本 v1.0.2
+# LIN-PortSentinel - 一体化管理脚本 v1.0.2
+# Author: LIN | Your Ports, Our Watch.
 
 PORTMONITOR_VERSION="1.0.2"
 
@@ -79,14 +80,18 @@ _install_rollback() {
 
 print_banner() {
     clear
-    printf '%b\n' "${BLUE}${BOLD}"
-    printf '%s\n' "╔═══════════════════════════════════════════════════════════════╗"
-    printf '%s\n' "║                                                               ║"
-    printf '%s\n' "║            端口安全监控管理系统                               ║"
-    printf '%s\n' "║                                                               ║"
-    printf '%s\n' "║       检测端口扫描 | 防御暴力破解 | 自动封禁攻击IP           ║"
-    printf '%s\n' "║                                                               ║"
-    printf '%s\n' "╚═══════════════════════════════════════════════════════════════╝"
+    printf '%b\n' "${CYAN}${BOLD}"
+    printf '%s\n' "                    ██▓     █    ██  ███▄    █                       "
+    printf '%s\n' "                   ▓██▒     ██  ▓██▒ ██ ▀█   █                      "
+    printf '%s\n' "                   ██░    ▓██  ▒██▒▓██  ▀█ ██▒                      "
+    printf '%b\n' "                   ${YELLOW}▓██░    ▓▓█  ░██░▓██▒  ▐▌██▒${CYAN}                      "
+    printf '%b\n' "                   ${YELLOW}▒█████▒▒▒█████▓ ▒██░   ▓██░${CYAN}                      "
+    printf '%b\n' "                   ${NC}${BOLD}  · · · P O R T S E N T I N E L · · ·${CYAN}${BOLD}        "
+    printf '%s\n' ""
+    printf '%b\n' "       ${GREEN}${BOLD}Your Ports, Our Watch.${CYAN}${BOLD}                                      "
+    printf '%b\n' "       ${NC}检测端口扫描 | 防御暴力破解 | 自动封禁攻击IP${CYAN}${BOLD}              "
+    printf '%b\n' "       ${NC}github.com/linjunhao024-byte/PortSentinel${CYAN}${BOLD}                  "
+    printf '%s\n' ""
     printf '%b\n' "${NC}"
 }
 
@@ -2318,7 +2323,7 @@ show_menu() {
     mem_str=$(free 2>/dev/null | awk '/Mem:/{printf "%.0f%%", $3/$2*100}' || echo "?")
 
     printf '%b\n' "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    printf "${BOLD}${CYAN}║${NC}  ${BOLD}PortSentinel${NC} v${PORTMONITOR_VERSION}  " && printf "${CYAN}│${NC}  主机: ${GREEN}%-16s${NC}" "$hostname_str" && printf "${CYAN}│${NC} 运行: ${GREEN}%-12s${NC} ${CYAN}║${NC}\n" "$uptime_str"
+    printf "${BOLD}${CYAN}║${NC}  ${BOLD}LIN${NC}-${BOLD}PortSentinel${NC} v${PORTMONITOR_VERSION}  " && printf "${CYAN}│${NC} 主机: ${GREEN}%-14s${NC}" "$hostname_str" && printf "${CYAN}│${NC} 运行: ${GREEN}%-10s${NC} ${CYAN}║${NC}\n" "$uptime_str"
     printf "${BOLD}${CYAN}║${NC}  " && printf "CPU: ${YELLOW}%-5s${NC} " "$cpu_str" && printf "${CYAN}│${NC} 内存: ${YELLOW}%-5s${NC} " "$mem_str"
 
     # 服务状态
@@ -2440,7 +2445,7 @@ main() {
         backup)     do_backup; exit 0 ;;
         full-uninstall) do_full_uninstall; exit 0 ;;
         cleanup)    do_cleanup; exit 0 ;;
-        --version|-v) echo "PortSentinel v${PORTMONITOR_VERSION}"; exit 0 ;;
+        --version|-v) echo "LIN-PortSentinel v${PORTMONITOR_VERSION}"; exit 0 ;;
         *)          show_menu_loop ;;
     esac
 }

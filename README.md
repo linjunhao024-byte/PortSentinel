@@ -1,7 +1,9 @@
 <div align="center">
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f0f0f,50:fce300,100:00f0ff&height=220&section=header&text=PortSentinel&fontSize=50&fontColor=fce300&fontAlignY=35&desc=Advanced%20Port%20Security%20Guardian&descSize=15&descColor=00f0ff&descAlignY=55&animation=twinkling" width="100%"/>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f0f0f,50:fce300,100:00f0ff&height=220&section=header&text=LIN-PortSentinel&fontSize=42&fontColor=fce300&fontAlignY=35&desc=Your%20Ports%2C%20Our%20Watch.&descSize=15&descColor=00f0ff&descAlignY=55&animation=twinkling" width="100%"/>
 
 <br/>
+
+**`LIN`** · Port Security Monitor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-fce300?style=flat-square&logo=open-source-initiative&logoColor=black)](LICENSE)
 [![Language: Python3](https://img.shields.io/badge/Engine-Python3-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org/)
@@ -12,7 +14,7 @@
 
 <br/>
 
-**`Because your ports deserve a sentinel, not a spectator.`**
+**`Your Ports, Our Watch.`**
 
 </div>
 

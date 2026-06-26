@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-PortSentinel - 端口安全监控检测引擎 v1.0.2
-高性能端口扫描、暴力破解、DDoS 检测与主动防御
+LIN-PortSentinel - Port Security Monitor Engine v1.0.2
+Your Ports, Our Watch.
+Author: LIN | github.com/linjunhao024-byte/PortSentinel
 """
 
 import argparse
@@ -2296,7 +2297,7 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PortSentinel Dashboard</title><style>
+<title>LIN-PortSentinel Dashboard</title><style>
 *{margin:0;padding:0;box-sizing:border-box}body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 .header{background:linear-gradient(135deg,#1a1f35,#0d1117);padding:16px 24px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1e293b}
 .header h1{font-size:20px;color:#60a5fa}.header .status{display:flex;gap:16px;font-size:13px}
@@ -2316,7 +2317,7 @@ canvas{width:100%;height:200px;background:#111827;border-radius:8px;border:1px s
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:900px){.two-col{grid-template-columns:1fr}}
 #loading{text-align:center;padding:40px;color:#6b7280}
 </style></head><body>
-<div class="header"><h1>🛡️ PortSentinel</h1><div class="status">
+<div class="header"><h1>🛡️ LIN-PortSentinel</h1><div class="status">
 <span><span class="dot" id="dot-svc"></span><span id="txt-svc">检测中...</span></span>
 <span>CPU: <span id="cpu">-</span></span><span>内存: <span id="mem">-</span></span>
 <span>包处理: <span id="pkts">-</span></span></div></div>
@@ -2633,7 +2634,8 @@ class PortSentinel:
 
     def start(self):
         logger.info("=" * 60)
-        logger.info("PortSentinel v%s 启动", VERSION)
+        logger.info("LIN-PortSentinel v%s | Your Ports, Our Watch.", VERSION)
+        logger.info("Author: LIN | github.com/linjunhao024-byte/PortSentinel")
         logger.info("配置: %s", self.config_path)
         logger.info("数据库: %s", self.db_path)
         logger.info("防火墙: %s", self.firewall.method)
@@ -3590,7 +3592,7 @@ def cmd_unban(engine, ip):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PortSentinel 端口安全监控引擎")
+        description="LIN-PortSentinel - Port Security Monitor Engine")
     parser.add_argument(
         "-config", dest="config_path", help="配置文件路径")
     parser.add_argument(
@@ -3598,7 +3600,7 @@ def main():
     parser.add_argument("ip", nargs="?", help="目标 IP")
     parser.add_argument(
         "-v", "--version", action="version",
-        version=f"PortSentinel v{VERSION}")
+        version=f"LIN-PortSentinel v{VERSION}")
 
     args = parser.parse_args()
 
