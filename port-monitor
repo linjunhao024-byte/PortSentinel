@@ -375,7 +375,7 @@ class Database:
                         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                         (ver,))
                     self.conn.commit()
-                    logger.info("数据库迁移到 v%d 完成", ver)
+                    logger.info("[LIN] 数据库迁移到 v%d 完成", ver)
                 except sqlite3.OperationalError as e:
                     logger.debug("迁移 v%d 跳过: %s", ver, e)
 
@@ -528,7 +528,7 @@ class Firewall:
                 logger.error("封禁命令失败 %s: %s", ip, stderr)
                 return False
 
-            logger.info("已封禁: %s (via %s)", ip, self.method)
+            logger.info("[LIN] 已封禁: %s (via %s)", ip, self.method)
             return True
         except Exception as e:
             logger.error("封禁失败 %s: %s", ip, e)
@@ -594,7 +594,7 @@ class Firewall:
                 if "No chain" not in stderr and "No such file" not in stderr:
                     logger.warning("解封命令返回非零: %s: %s", ip, stderr)
 
-            logger.info("已解封: %s", ip)
+            logger.info("[LIN] 已解封: %s", ip)
             return True
         except Exception as e:
             logger.error("解封失败 %s: %s", ip, e)
@@ -699,7 +699,7 @@ class Alerter:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read())
                 if result.get("ok"):
-                    logger.info("Telegram 告警发送成功")
+                    logger.info("[LIN] Telegram 告警发送成功")
                 else:
                     logger.warning("Telegram 响应异常: %s", result)
         except Exception as e:
@@ -734,7 +734,7 @@ class Alerter:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read())
                 if result.get("errcode") == 0:
-                    logger.info("钉钉告警发送成功")
+                    logger.info("[LIN] 钉钉告警发送成功")
                 else:
                     logger.warning("钉钉响应异常: %s", result)
         except Exception as e:
@@ -770,7 +770,7 @@ class Alerter:
                     smtp.starttls()
                 smtp.login(user, passwd)
                 smtp.sendmail(user, [to], mime.as_string())
-                logger.info("邮件告警发送成功")
+                logger.info("[LIN] 邮件告警发送成功")
             finally:
                 if smtp:
                     try:
@@ -794,7 +794,7 @@ class Alerter:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read())
                 if result.get("errcode") == 0:
-                    logger.info("企业微信告警发送成功")
+                    logger.info("[LIN] 企业微信告警发送成功")
                 else:
                     logger.warning("企业微信响应异常: %s", result)
         except Exception as e:
@@ -825,7 +825,7 @@ class Alerter:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read())
                 if result.get("code") == 0:
-                    logger.info("飞书告警发送成功")
+                    logger.info("[LIN] 飞书告警发送成功")
                 else:
                     logger.warning("飞书响应异常: %s", result)
         except Exception as e:
@@ -844,7 +844,7 @@ class Alerter:
             req.add_header("Content-Type", "application/json")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 if resp.read().decode().strip() == "ok":
-                    logger.info("Slack 告警发送成功")
+                    logger.info("[LIN] Slack 告警发送成功")
                 else:
                     logger.warning("Slack 响应异常")
         except Exception as e:
@@ -1070,7 +1070,7 @@ class ThreatIntel:
                             count += 1
                         except ValueError:
                             pass
-                    logger.info("威胁情报同步 %s: %d 条", name, count)
+                    logger.info("[LIN] 威胁情报同步 %s: %d 条", name, count)
             except Exception as e:
                 logger.debug("威胁情报同步失败 %s: %s", name, e)
 
@@ -1252,7 +1252,7 @@ class HoneypotService:
             srv.settimeout(1.0)
             srv.bind(("0.0.0.0", port))
             srv.listen(5)
-            logger.info("蜜罐服务监听 :%d [%s]", port, service)
+            logger.info("[LIN] 蜜罐服务监听 :%d [%s]", port, service)
             while self._running:
                 try:
                     conn, addr = srv.accept()
@@ -1564,7 +1564,7 @@ class Autopilot:
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        logger.info("无人驾驶模式已启动 (健康检查:%ds, 清理:%dd天, 备份:%s)",
+        logger.info("[LIN] 无人驾驶模式已启动 (健康检查:%ds, 清理:%dd天, 备份:%s)",
                      self._health_interval, self._cleanup_keep_days,
                      "开" if self._backup_enabled else "关")
 
@@ -2402,7 +2402,7 @@ class APIServer:
             self._thread = threading.Thread(
                 target=self._server.serve_forever, daemon=True)
             self._thread.start()
-            logger.info("API 服务已启动: http://%s:%d", self.host, self.port)
+            logger.info("[LIN] API 服务已启动: http://%s:%d", self.host, self.port)
         except Exception as e:
             logger.error("API 服务启动失败: %s", e)
 
@@ -2421,9 +2421,9 @@ class PortSentinel:
         self.config = load_config(config_path)
         warns, errs = validate_config(self.config)
         for w in warns:
-            logger.warning("配置警告: %s", w)
+            logger.warning("[LIN] 配置警告: %s", w)
         for e in errs:
-            logger.error("配置错误: %s", e)
+            logger.error("[LIN] 配置错误: %s", e)
         if errs:
             logger.error("配置存在 %d 个错误，部分功能可能异常", len(errs))
         self.running = False
@@ -2691,7 +2691,7 @@ class PortSentinel:
             fed_thread = threading.Thread(
                 target=self._federation_loop, daemon=True)
             fed_thread.start()
-            logger.info("分布式联动: %d 个节点, 同步间隔%ds",
+            logger.info("[LIN] 分布式联动: %d 个节点, 同步间隔%ds",
                         len(self.fed_peers), self.fed_sync_interval)
 
         try:
@@ -2702,7 +2702,7 @@ class PortSentinel:
             self.stop()
 
     def stop(self):
-        logger.info("正在停止...")
+        logger.info("[LIN] 正在停止...")
         self.running = False
         for s in (self._sockets or []):
             try:
@@ -2716,7 +2716,7 @@ class PortSentinel:
         self.response_manager.stop()
         self.alerter.stop()
         self.db.close()
-        logger.info("已停止 (处理了 %d 个包)", self.pkt_count)
+        logger.info("[LIN] 已停止 (处理了 %d 个包)", self.pkt_count)
 
     def _signal_handler(self, signum, frame):
         logger.info("收到信号 %d", signum)
@@ -2737,9 +2737,9 @@ class PortSentinel:
         new_config = load_config(self.config_path)
         warns, errs = validate_config(new_config)
         for w in warns:
-            logger.warning("配置警告: %s", w)
+            logger.warning("[LIN] 配置警告: %s", w)
         for e in errs:
-            logger.error("配置错误: %s", e)
+            logger.error("[LIN] 配置错误: %s", e)
 
         # 更新防火墙（白名单可能变化）
         ban_cfg = new_config.get("ban", {})
@@ -2830,7 +2830,7 @@ class PortSentinel:
         self.check_interval = new_interval
 
         self.config = new_config
-        logger.info("配置热加载完成")
+        logger.info("[LIN] 配置热加载完成")
         logger.info("  防火墙: %s", self.firewall.method)
         logger.info("  检测间隔: %ds", self.check_interval)
         logger.info("  敏感端口: %s", ", ".join(
@@ -2844,7 +2844,7 @@ class PortSentinel:
         cur = self.db.conn.execute("SELECT ip FROM blocked_ips")
         ips = [row[0] for row in cur.fetchall()]
         if ips:
-            logger.info("恢复 %d 条封禁规则...", len(ips))
+            logger.info("[LIN] 恢复 %d 条封禁规则...", len(ips))
             for ip in ips:
                 self.firewall.ban(ip)
 
@@ -2854,7 +2854,7 @@ class PortSentinel:
         try:
             sock = socket.socket(
                 socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
-            logger.info("使用 AF_PACKET 抓包 (双栈 v4+v6)")
+            logger.info("[LIN] 使用 AF_PACKET 抓包 (双栈 v4+v6)")
             return [sock], "af_packet"
         except (PermissionError, OSError):
             pass
@@ -2878,7 +2878,7 @@ class PortSentinel:
             logger.error("需要 root 权限运行")
             sys.exit(1)
 
-        logger.info("使用 AF_INET 抓包 (%d 个 socket)", len(socks))
+        logger.info("[LIN] 使用 AF_INET 抓包 (%d 个 socket)", len(socks))
         return socks, "af_inet"
 
     def _capture_loop(self):
@@ -2887,7 +2887,7 @@ class PortSentinel:
         for s in socks:
             s.settimeout(1.0)
 
-        logger.info("开始抓包监控...")
+        logger.info("[LIN] 开始抓包监控...")
 
         while self.running:
             if len(socks) > 1:
@@ -3477,7 +3477,7 @@ class PortSentinel:
                     # 清除该 IP 的追踪数据，避免解封后立即重封
                     with self._data_lock:
                         self.syn_data.pop(ip, None)
-                    logger.info("自动解封: %s", ip)
+                    logger.info("[LIN] 自动解封: %s", ip)
             except Exception as e:
                 logger.error("过期解封异常: %s", e)
 

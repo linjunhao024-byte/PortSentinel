@@ -358,7 +358,7 @@ do_install() {
                     return
                 else
                     error "发送失败: $(echo "$tg_resp" | grep -o '"description":"[^"]*"' || echo "$tg_resp")"
-                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_TELEGRAM="n" && warn "已跳过" && return
+                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_TELEGRAM="n" && warn "[LIN] 已跳过" && return
                 fi
             done
         }
@@ -387,7 +387,7 @@ do_install() {
                     return
                 else
                     error "发送失败: $ding_resp"
-                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_DINGTALK="n" && warn "已跳过" && return
+                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_DINGTALK="n" && warn "[LIN] 已跳过" && return
                 fi
             done
         }
@@ -420,7 +420,7 @@ do_install() {
                     return
                 else
                     error "发送失败: ${mail_resp:-curl 退出码 $curl_exit}"
-                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_EMAIL="n" && warn "已跳过" && return
+                    [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_EMAIL="n" && warn "[LIN] 已跳过" && return
                 fi
             done
         }
@@ -471,7 +471,7 @@ do_install() {
     printf '%b\n' "  服务器: $([ "$MONITOR_MODE" = "cloud" ] && printf '%b\n' "${GREEN}云服务器${NC}" || printf '%b\n' "${GREEN}独立服务器${NC}")"
     printf '%b\n' "  告警: $([ "$ENABLE_TELEGRAM" = "y" ] && echo -n "TG " ; [ "$ENABLE_DINGTALK" = "y" ] && echo -n "钉钉 " ; [ "$ENABLE_EMAIL" = "y" ] && echo -n "邮件 " ; [ "$ENABLE_TELEGRAM" = "n" ] && [ "$ENABLE_DINGTALK" = "n" ] && [ "$ENABLE_EMAIL" = "n" ] && echo -n "未配置")"
     echo ""
-    [ "$(ask_yn "确认安装？" "y")" != "y" ] && warn "已取消" && trap - ERR INT TERM && set +e && exit 0
+    [ "$(ask_yn "确认安装？" "y")" != "y" ] && warn "[LIN] 已取消" && trap - ERR INT TERM && set +e && exit 0
 
     printf '%b\n' "\n${CYAN}正在部署...${NC}"
 
@@ -493,7 +493,7 @@ do_install() {
     systemctl enable "$SERVICE_NAME"
     trap - ERR INT TERM
     set +e
-    info "部署完成"
+    info "[LIN] 部署完成"
 
     echo ""
     printf '%b\n' "  ${GREEN}快捷命令:${NC} pm"
@@ -502,7 +502,7 @@ do_install() {
 
     if [ "$(ask_yn "现在启动服务？" "y")" = "y" ]; then
         if systemctl start "$SERVICE_NAME" 2>&1; then
-            info "服务已启动"
+            info "[LIN] 服务已启动"
         else
             error "启动失败，查看日志: journalctl -u $SERVICE_NAME -n 10 --no-pager"
         fi
@@ -817,7 +817,7 @@ do_update() {
     if [ -s "/usr/local/bin/port-monitor-ctl.tmp" ]; then
         mv -f "/usr/local/bin/port-monitor-ctl.tmp" "/usr/local/bin/port-monitor-ctl"
         chmod +x "/usr/local/bin/port-monitor-ctl"
-        info "管理脚本已更新"
+        info "[LIN] 管理脚本已更新"
     else
         rm -f "/usr/local/bin/port-monitor-ctl.tmp"
     fi
@@ -825,7 +825,7 @@ do_update() {
     # ── 重启服务 ──
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         if systemctl restart "$SERVICE_NAME" 2>&1; then
-            info "服务已重启"
+            info "[LIN] 服务已重启"
         else
             error "重启失败: journalctl -u $SERVICE_NAME -n 5 --no-pager"
         fi
@@ -855,11 +855,11 @@ _do_local_update() {
     info "已备份旧版本到 $backup"
     rm -f "$INSTALL_DIR/port-monitor"
     install -m 755 ./port-monitor "$INSTALL_DIR/port-monitor"
-    info "程序文件已更新"
+    info "[LIN] 程序文件已更新"
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
-        systemctl restart "$SERVICE_NAME" 2>&1 && info "服务已重启" || error "重启失败"
+        systemctl restart "$SERVICE_NAME" 2>&1 && info "[LIN] 服务已重启" || error "重启失败"
     fi
-    info "更新完成"
+    info "[LIN] 更新完成"
 }
 
 do_uninstall() {
@@ -915,13 +915,13 @@ do_full_uninstall() {
     rm -f "/etc/logrotate.d/port-monitor"
     rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     systemctl daemon-reload
-    info "完全卸载完成"
+    info "[LIN] 完全卸载完成"
 }
 
 do_start() {
     check_root
     if systemctl start "$SERVICE_NAME" 2>&1; then
-        info "服务已启动"
+        info "[LIN] 服务已启动"
     else
         error "启动失败: journalctl -u $SERVICE_NAME -n 5 --no-pager"
     fi
@@ -930,7 +930,7 @@ do_start() {
 do_stop() {
     check_root
     if systemctl stop "$SERVICE_NAME" 2>&1; then
-        info "服务已停止"
+        info "[LIN] 服务已停止"
     else
         error "停止失败"
     fi
@@ -939,7 +939,7 @@ do_stop() {
 do_restart() {
     check_root
     if systemctl restart "$SERVICE_NAME" 2>&1; then
-        info "服务已重启"
+        info "[LIN] 服务已重启"
     else
         error "重启失败: journalctl -u $SERVICE_NAME -n 5 --no-pager"
     fi
@@ -1035,7 +1035,7 @@ do_unban() {
             iptables)
                 local cmd="iptables"
                 $v6 && cmd="ip6tables"
-                $cmd -D INPUT -s "$ip" -j DROP 2>/dev/null && info "已解封 $ip" || warn "IP不在封禁列表"
+                $cmd -D INPUT -s "$ip" -j DROP 2>/dev/null && info "已解封 $ip" || warn "[LIN] IP不在封禁列表"
                 ;;
             firewalld)
                 local family="ipv4"
@@ -1043,14 +1043,14 @@ do_unban() {
                 firewall-cmd --remove-rich-rule="rule family='$family' source address='$ip' reject" --permanent 2>/dev/null \
                     && firewall-cmd --reload 2>/dev/null \
                     && info "已解封 $ip" \
-                    || warn "IP不在封禁列表"
+                    || warn "[LIN] IP不在封禁列表"
                 ;;
             nftables)
                 local addr_type="ip"
                 $v6 && addr_type="ip6"
                 nft delete rule inet filter input $addr_type saddr "$ip" drop 2>/dev/null \
                     && info "已解封 $ip" \
-                    || warn "IP不在封禁列表"
+                    || warn "[LIN] IP不在封禁列表"
                 ;;
             *)
                 error "未知防火墙后端，请手动解封"
@@ -1163,7 +1163,7 @@ do_manage_whitelist() {
                 ;;
             r|R)
                 if [ $idx -eq 0 ]; then
-                    warn "白名单为空"
+                    warn "[LIN] 白名单为空"
                     continue
                 fi
                 local del_idx
@@ -1714,7 +1714,7 @@ SCRIPTEOF
     crontab -l 2>/dev/null | grep -v "port-monitor-report" | crontab - 2>/dev/null || true
     (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
 
-    info "定时报告已配置"
+    info "[LIN] 定时报告已配置"
     printf '%b\n' "  ${CYAN}类型:${NC} ${label}"
     printf '%b\n' "  ${CYAN}周期:${NC} ${cron_expr}"
     printf '%b\n' "  ${CYAN}通道:${NC} ${channel}"
@@ -2014,7 +2014,7 @@ do_health_check() {
         pid=$(pgrep -x "port-monitor" || true)
         info "运行中 [PID: ${pid:-未知}]"
     else
-        warn "服务未运行"
+        warn "[LIN] 服务未运行"
         issues=$((issues + 1))
     fi
 
@@ -2177,7 +2177,7 @@ do_cleanup() {
 
     echo ""
     if [ "$(ask_yn "确认执行清理？" "n")" != "y" ]; then
-        warn "已取消"
+        warn "[LIN] 已取消"
         return
     fi
 
@@ -2199,7 +2199,7 @@ do_cleanup() {
     fi
 
     echo ""
-    info "清理完成"
+    info "[LIN] 清理完成"
 }
 
 # ── Web 仪表盘 ──────────────────────────────────────────────
