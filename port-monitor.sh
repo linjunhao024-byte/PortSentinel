@@ -81,23 +81,39 @@ _install_rollback() {
 
 print_banner() {
     clear
-    local W=60
-    local sep
+    local W=56
+    local sep blank
     sep=$(printf '%*s' "$W" '' | tr ' ' '=')
-    local title="LIN - PORTSENTINEL"
-    local tagline="Your Ports, Our Watch."
-    local t_pad=$(( (W - ${#title}) / 2 ))
-    local g_pad=$(( (W - ${#tagline}) / 2 ))
-    local blank
     blank=$(printf '%*s' "$W" '')
+
+    # LIN ASCII art - 7 lines, each exactly 32 chars
+    local a1="####        #####       ###   ##"
+    local a2="####          ##       # #   ## "
+    local a3="####          ##       #  #  ## "
+    local a4="####          ##       #   # ## "
+    local a5="####          ##       #    ### "
+    local a6="####          ##       #     ## "
+    local a7="########    #####       #     ##"
+
+    local title="P O R T S E N T I N E L"
+    local tagline="Your Ports, Our Watch."
+    local tw=${#title} tgw=${#tagline}
+    local tp=$(( (W - tw) / 2 ))
+    local tgp=$(( (W - tgw) / 2 ))
 
     printf '\n'
     printf '%b\n' "${CYAN}${BOLD}  +${sep}+${NC}"
     printf '%b\n' "${CYAN}${BOLD}  |${blank}|${NC}"
-    printf '%b\n' "${CYAN}${BOLD}  |$(printf '%*s' $t_pad '')${WHITE}${BOLD}${title}${NC}${CYAN}${BOLD}$(printf '%*s' $((W - t_pad - ${#title})) '')|${NC}"
+    for line in "$a1" "$a2" "$a3" "$a4" "$a5" "$a6" "$a7"; do
+        local lw=${#line}
+        local p=$(( (W - lw) / 2 ))
+        printf '%b\n' "${CYAN}${BOLD}  |$(printf '%*s' $p '')${WHITE}${line}${CYAN}${BOLD}$(printf '%*s' $((W - p - lw)) '')|${NC}"
+    done
     printf '%b\n' "${CYAN}${BOLD}  |${blank}|${NC}"
     printf '%b\n' "${CYAN}${BOLD}  |${sep}|${NC}"
-    printf '%b\n' "${CYAN}  |$(printf '%*s' $g_pad '')${GREEN}${BOLD}${tagline}${NC}${CYAN}$(printf '%*s' $((W - g_pad - ${#tagline})) '')|${NC}"
+    printf '%b\n' "${CYAN}  |$(printf '%*s' $tp '')${WHITE}${BOLD}${title}${NC}${CYAN}$(printf '%*s' $((W - tp - tw)) '')|${NC}"
+    printf '%b\n' "${CYAN}  |${blank}|${NC}"
+    printf '%b\n' "${CYAN}  |$(printf '%*s' $tgp '')${GREEN}${BOLD}${tagline}${NC}${CYAN}$(printf '%*s' $((W - tgp - tgw)) '')|${NC}"
     printf '%b\n' "${CYAN}  |${blank}|${NC}"
     printf '%b\n' "${CYAN}  +${sep}+${NC}"
     printf '\n'
