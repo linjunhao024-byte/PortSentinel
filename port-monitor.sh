@@ -422,8 +422,24 @@ do_install() {
     esac
     info "灵敏度: 端口扫描=${SCAN_THRESHOLD}/10s, SSH暴破=${BRUTE_THRESHOLD}/min"
 
-    # ── 步骤 4: 确认安装 ──
-    print_step "步骤 4/4: 确认安装"
+    # ── 步骤 4: 无人驾驶 ──
+    print_step "步骤 4/5: 无人驾驶模式"
+    printf '%b\n' "  启用后系统将自动："
+    printf '%b\n' "    • 定期健康检查 + 自动修复常见故障"
+    printf '%b\n' "    • 每天自动清理过期数据和日志"
+    printf '%b\n' "    • 每天自动备份配置和数据库"
+    printf '%b\n' "    • 检测 GitHub 新版本并通知"
+    echo ""
+    ENABLE_AUTOPILOT="n"
+    if [ "$(ask_yn "是否启用无人驾驶模式？" "y")" = "y" ]; then
+        ENABLE_AUTOPILOT="y"
+        info "无人驾驶模式: 已启用"
+    else
+        info "无人驾驶模式: 未启用"
+    fi
+
+    # ── 步骤 5: 确认安装 ──
+    print_step "步骤 5/5: 确认安装"
     printf '%b\n' "  服务器: $([ "$MONITOR_MODE" = "cloud" ] && printf '%b\n' "${GREEN}云服务器${NC}" || printf '%b\n' "${GREEN}独立服务器${NC}")"
     printf '%b\n' "  告警: $([ "$ENABLE_TELEGRAM" = "y" ] && echo -n "TG " ; [ "$ENABLE_DINGTALK" = "y" ] && echo -n "钉钉 " ; [ "$ENABLE_EMAIL" = "y" ] && echo -n "邮件 " ; [ "$ENABLE_TELEGRAM" = "n" ] && [ "$ENABLE_DINGTALK" = "n" ] && [ "$ENABLE_EMAIL" = "n" ] && echo -n "未配置")"
     echo ""
@@ -647,6 +663,23 @@ $([ "$IGNORE_INTERNAL" = "y" ] && cat << 'WHITELIST'
     - "fc00::/7"
 WHITELIST
 )
+
+# 无人驾驶模式
+autopilot:
+  enabled: $([ "$ENABLE_AUTOPILOT" = "y" ] && echo "true" || echo "false")
+  health_check_interval: 5m
+  max_restart_attempts: 3
+  restart_cooldown: 60s
+  auto_cleanup: true
+  cleanup_interval: 24h
+  cleanup_keep_days: 30
+  auto_backup: true
+  backup_interval: 24h
+  backup_keep_count: 7
+  backup_dir: "${DATA_DIR}/backups"
+  auto_update: false
+  update_check_interval: 24h
+  auto_update_apply: false
 EOF
 }
 

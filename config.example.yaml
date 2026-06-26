@@ -153,3 +153,24 @@ ban:
   whitelist:
     - "127.0.0.1"
     - "::1"
+
+# 无人驾驶模式（Autopilot）：装完就忘，永不再管
+autopilot:
+  enabled: false
+  # 健康监控：定期检查各项组件状态，自动修复
+  health_check_interval: 5m    # 健康检查间隔
+  max_restart_attempts: 3      # 连续失败最大重试次数
+  restart_cooldown: 60s        # 重试冷却期
+  # 自动清理：定期清理过期数据和日志
+  auto_cleanup: true
+  cleanup_interval: 24h        # 清理间隔
+  cleanup_keep_days: 30        # 保留天数
+  # 自动备份：定期打包配置和数据库
+  auto_backup: true
+  backup_interval: 24h         # 备份间隔
+  backup_keep_count: 7         # 保留备份数量
+  backup_dir: "/var/lib/port-monitor/backups"
+  # 自动更新：检查 GitHub 新版本
+  auto_update: false           # 仅检查，不自动安装
+  update_check_interval: 24h
+  auto_update_apply: false     # 自动安装更新（谨慎开启）
