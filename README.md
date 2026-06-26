@@ -28,6 +28,10 @@ wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSe
 
 ---
 
+> **📚 新手必读：[完整使用教程 TUTORIAL.md](TUTORIAL.md)** — 从安装到高级功能，图文并茂，小白也能看懂
+
+---
+
 ## 📖 项目简介 | Introduction
 
 **PortSentinel** 是一套面向生产环境的高性能端口安全监控与主动防御中枢。它摒弃了传统 IDS/IPS 的臃肿架构，以 **Python 原生侦测引擎**（零外部依赖）为矛、**Bash 全拟态 TUI 管控中枢** 为盾，构建了一套从「实时感知」到「内核级阻断」的完整防御闭环。
