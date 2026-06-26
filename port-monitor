@@ -757,7 +757,7 @@ class Alerter:
         try:
             hostname = socket.gethostname()
             mime = MIMEText(msg, "plain", "utf-8")
-            mime["Subject"] = f"PortSentinel 告警 - {hostname}"
+            mime["Subject"] = f"LIN-PortSentinel 告警 - {hostname}"
             mime["From"] = user
             mime["To"] = to
 
@@ -1776,7 +1776,7 @@ class Autopilot:
         try:
             os.makedirs(self._backup_dir, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(self._backup_dir, f"backup_{ts}.tar.gz")
+            filename = os.path.join(self._backup_dir, f"lin-portsentinel-backup-{ts}.tar.gz")
             config_dir = "/etc/port-monitor"
             data_dir = "/var/lib/port-monitor"
             import tarfile
@@ -2029,6 +2029,7 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             "adaptive": engine.adaptive_enabled,
             "honeypot": engine.honeypot_enabled,
             "autopilot": engine.autopilot.status,
+            "author": "LIN",
         }
         if engine.fed_enabled:
             resp["federation"] = {
@@ -2533,7 +2534,7 @@ class PortSentinel:
         # 告警模板
         self._default_templates = {
             "ban": (
-                "🚨 PortSentinel 自动封禁\n"
+                "🚨 LIN-PortSentinel 自动封禁\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 "来源: {{src_ip}}\n"
                 "类型: {{attack_type}}\n"

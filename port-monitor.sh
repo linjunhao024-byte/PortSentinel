@@ -351,7 +351,7 @@ do_install() {
                 local tg_resp
                 tg_resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                     -d chat_id="$TELEGRAM_CHAT_ID" \
-                    -d text="🧪 PortSentinel 告警测试" \
+                    -d text="🧪 LIN-PortSentinel 告警测试" \
                     --connect-timeout 10 --max-time 15 2>&1)
                 if echo "$tg_resp" | grep -q '"ok":true'; then
                     info "Telegram 验证成功"
@@ -380,7 +380,7 @@ do_install() {
                 local ding_resp
                 ding_resp=$(curl -s -X POST "$ding_url" \
                     -H 'Content-Type: application/json' \
-                    -d '{"msgtype":"text","text":{"content":"🧪 PortSentinel 告警测试"}}' \
+                    -d '{"msgtype":"text","text":{"content":"🧪 LIN-PortSentinel 告警测试"}}' \
                     --connect-timeout 10 --max-time 15 2>&1)
                 if echo "$ding_resp" | grep -q '"errcode":0'; then
                     info "钉钉验证成功"
@@ -410,7 +410,7 @@ do_install() {
                 local curl_proto="smtp"
                 [ "$EMAIL_PORT" = "465" ] && curl_proto="smtps"
                 local mail_resp curl_exit=0
-                mail_resp=$(printf '%b\n' "Subject: PortSentinel 告警测试\nContent-Type: text/plain; charset=UTF-8\n\n🧪 PortSentinel 告警测试" | \
+                mail_resp=$(printf '%b\n' "Subject: LIN-PortSentinel 告警测试\nContent-Type: text/plain; charset=UTF-8\n\n🧪 LIN-PortSentinel 告警测试" | \
                     curl -s --url "${curl_proto}://${EMAIL_HOST}:${EMAIL_PORT}" \
                     --ssl-reqd --mail-from "$EMAIL_USER" --mail-rcpt "$EMAIL_TO" \
                     --user "${EMAIL_USER}:${EMAIL_PASS}" \
@@ -529,7 +529,7 @@ generate_config() {
     fi
 
     cat > "$CONFIG_FILE" << EOF
-# 端口安全监控配置 v${PORTMONITOR_VERSION}
+# LIN-PortSentinel 配置 v${PORTMONITOR_VERSION}
 
 monitor:
   interval: 5s
@@ -714,7 +714,7 @@ EOF
 create_service() {
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
-Description=Port Security Monitor
+Description=LIN-PortSentinel Security Monitor
 After=network.target
 
 [Service]
@@ -733,6 +733,7 @@ EOF
 
 create_logrotate() {
     cat > "/etc/logrotate.d/port-monitor" << EOF
+# LIN-PortSentinel log rotation
 ${LOG_DIR}/port-monitor.log {
     daily
     rotate 7
@@ -1207,7 +1208,7 @@ do_test_alert() {
     hostname=$(hostname 2>/dev/null || echo "未知")
     local now
     now=$(date '+%Y-%m-%d %H:%M:%S')
-    local test_msg="🧪 PortSentinel 告警测试\n\n主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
+    local test_msg="🧪 LIN-PortSentinel 告警测试\n\n主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
 
     # 逐段解析各通道的 enabled 状态和凭据
     local tg_section dingtalk_section email_section
@@ -1267,7 +1268,7 @@ do_test_alert() {
 {
     "msgtype": "text",
     "text": {
-        "content": "PortSentinel 告警测试\n主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
+        "content": "LIN-PortSentinel 告警测试\n主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
     }
 }
 DINGEOF
@@ -1298,7 +1299,7 @@ DINGEOF
         mail_to=$(echo "$email_section" | grep '^\s*to:' | awk '{print $2}' | tr -d '"')
         if [ -n "$smtp_host" ] && [ -n "$username" ] && [ -n "$password" ] && [ -n "$mail_to" ]; then
             printf '%b\n' "${CYAN}[邮件]${NC} 发送测试邮件..."
-            local mail_subject="PortSentinel 告警测试 - ${hostname}"
+            local mail_subject="LIN-PortSentinel 告警测试 - ${hostname}"
             local mail_body="主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
             # 优先用 msmtp / sendmail，回退到 curl SMTP
             if command -v msmtp &>/dev/null; then
@@ -1466,7 +1467,7 @@ _report_format() {
     local now
     now=$(date '+%Y-%m-%d %H:%M:%S')
 
-    REPORT_BODY="📊 PortSentinel 安全报告"
+    REPORT_BODY="📊 LIN-PortSentinel 安全报告"
     REPORT_BODY+="\n━━━━━━━━━━━━━━━━━━━━━━━━"
     REPORT_BODY+="\n📅 时段: ${period_label}"
     REPORT_BODY+="\n🖥️ 主机: ${hostname}"
@@ -1594,7 +1595,7 @@ _report_send() {
                 local ding_resp
                 ding_resp=$(curl -s -X POST "$full_url" \
                     -H 'Content-Type: application/json' \
-                    -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"PortSentinel 安全报告\n${report_json}\"}}" \
+                    -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"LIN-PortSentinel 安全报告\n${report_json}\"}}" \
                     --connect-timeout 10 --max-time 15 2>&1)
                 echo "$ding_resp" | grep -q '"errcode":0' && info "钉钉发送成功" || error "钉钉发送失败: $ding_resp"
                 sent=true
@@ -1621,7 +1622,7 @@ _report_send() {
                 local mail_resp
                 mail_resp=$(printf "To: %s\nSubject: =?UTF-8?B?%s?=\nContent-Type: text/plain; charset=UTF-8\n\n%s" \
                     "$mail_to" \
-                    "$(echo -n "PortSentinel 安全报告 - ${hostname}" | base64)" \
+                    "$(echo -n "LIN-PortSentinel 安全报告 - ${hostname}" | base64)" \
                     "$(printf '%b\n' "$REPORT_BODY")" | \
                     curl -s --url "${curl_proto}://${smtp_host}:${smtp_port}" \
                     --ssl-reqd --mail-from "$username" --mail-rcpt "$mail_to" \
@@ -1812,7 +1813,7 @@ do_stats() {
 }
 
 do_backup() {
-    local file="port-monitor-backup-$(date +%Y%m%d%H%M%S).tar.gz"
+    local file="lin-portsentinel-backup-$(date +%Y%m%d%H%M%S).tar.gz"
     if tar -czf "$file" -C / etc/port-monitor var/lib/port-monitor 2>/dev/null; then
         info "备份完成: $file"
     else
