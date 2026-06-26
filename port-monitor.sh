@@ -677,9 +677,9 @@ autopilot:
   backup_interval: 24h
   backup_keep_count: 7
   backup_dir: "${DATA_DIR}/backups"
-  auto_update: false
-  update_check_interval: 24h
-  auto_update_apply: false
+  auto_update: true
+  update_check_interval: 12h
+  auto_update_apply: true
 EOF
 }
 
@@ -722,28 +722,78 @@ do_update() {
     check_root
     print_banner
 
-    if [ ! -f "./port-monitor" ]; then
-        error "当前目录未找到 port-monitor 可执行文件"
-        printf '%b\n' "${YELLOW}请将新版 port-monitor 放到当前目录后重试${NC}"
-        exit 1
+    local box_w=62
+    local current_ver="$PORTMONITOR_VERSION"
+
+    # ── 版本对比框 ──
+    printf '%b\n' "${CYAN}${BOLD}┌$(printf '%0.s─' $(seq 1 $box_w))┐${NC}"
+    printf '%b\n' "${CYAN}│${NC}  ${BOLD}一键更新${NC}$(printf '%0.s ' $(seq 1 $((box_w - 10))))${CYAN}│${NC}"
+    printf '%b\n' "${CYAN}├$(printf '%0.s─' $(seq 1 $box_w))┤${NC}"
+    printf '%b\n' "${CYAN}│${NC}    当前版本: ${GREEN}v${current_ver}${NC}$(printf '%0.s ' $(seq 1 $((box_w - 18 - ${#current_ver}))))${CYAN}│${NC}"
+    printf '%b\n' "${CYAN}│${NC}    检查 GitHub...$(printf '%0.s ' $(seq 1 $((box_w - 20))))${CYAN}│${NC}"
+
+    # ── 从 GitHub 获取最新版本 ──
+    local remote_ver=""
+    remote_ver=$(curl -s "https://api.github.com/repos/linjunhao024-byte/PortSentinel/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | head -1 | sed 's/.*"v\?\([^"]*\)".*/\1/' || true)
+
+    if [ -z "$remote_ver" ]; then
+        printf '%b\n' "${CYAN}│${NC}    ${RED}✗ 无法获取 GitHub 版本${NC}$(printf '%0.s ' $(seq 1 $((box_w - 26))))${CYAN}│${NC}"
+        printf '%b\n' "${CYAN}└$(printf '%0.s─' $(seq 1 $box_w))┘${NC}"
+        echo ""
+        # 回退到本地文件更新
+        if [ -f "./port-monitor" ]; then
+            if [ "$(ask_yn "是否从当前目录更新？" "n")" = "y" ]; then
+                _do_local_update
+            fi
+        else
+            error "当前目录未找到 port-monitor 可执行文件"
+        fi
+        return
     fi
 
-    if [ ! -f "$INSTALL_DIR/port-monitor" ]; then
-        error "PortSentinel 尚未安装，请先执行安装"
-        exit 1
+    printf '%b\n' "${CYAN}│${NC}    GitHub 版本: ${YELLOW}v${remote_ver}${NC}$(printf '%0.s ' $(seq 1 $((box_w - 20 - ${#remote_ver}))))${CYAN}│${NC}"
+
+    # ── 版本比较 ──
+    if _version_gte "$current_ver" "$remote_ver"; then
+        printf '%b\n' "${CYAN}│${NC}    ${GREEN}✓ 已是最新版本${NC}$(printf '%0.s ' $(seq 1 $((box_w - 18))))${CYAN}│${NC}"
+        printf '%b\n' "${CYAN}└$(printf '%0.s─' $(seq 1 $box_w))┘${NC}"
+        echo ""
+        return
     fi
 
-    printf '%b\n' "${CYAN}将更新 PortSentinel 程序文件[配置和数据保留不变]${NC}\n"
+    printf '%b\n' "${CYAN}│${NC}    ${YELLOW}⬆ 发现新版本，正在更新...${NC}$(printf '%0.s ' $(seq 1 $((box_w - 26))))${CYAN}│${NC}"
+    printf '%b\n' "${CYAN}└$(printf '%0.s─' $(seq 1 $box_w))┘${NC}"
+    echo ""
 
+    # ── 下载更新 ──
     local backup="/tmp/port-monitor.bak.$(date +%s)"
-    cp "$INSTALL_DIR/port-monitor" "$backup"
-    info "已备份旧版本到 $backup"
+    if [ -f "$INSTALL_DIR/port-monitor" ]; then
+        cp "$INSTALL_DIR/port-monitor" "$backup"
+        info "已备份旧版本到 $backup"
+    fi
 
-    # 原子替换：先删后写，避免 Text file busy 错误
-    rm -f "$INSTALL_DIR/port-monitor"
-    install -m 755 ./port-monitor "$INSTALL_DIR/port-monitor"
-    info "程序文件已更新"
+    printf '%b\n' "${CYAN}正在下载 port-monitor...${NC}"
+    if ! curl -sL "https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor" -o "$INSTALL_DIR/port-monitor.tmp"; then
+        error "下载失败"
+        [ -f "$backup" ] && cp "$backup" "$INSTALL_DIR/port-monitor"
+        return
+    fi
+    chmod +x "$INSTALL_DIR/port-monitor.tmp"
+    mv -f "$INSTALL_DIR/port-monitor.tmp" "$INSTALL_DIR/port-monitor"
+    info "引擎已更新 v${current_ver} → v${remote_ver}"
 
+    printf '%b\n' "${CYAN}正在下载 port-monitor.sh...${NC}"
+    curl -sL "https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor.sh" -o "/usr/local/bin/port-monitor-ctl.tmp" 2>/dev/null
+    if [ -s "/usr/local/bin/port-monitor-ctl.tmp" ]; then
+        mv -f "/usr/local/bin/port-monitor-ctl.tmp" "/usr/local/bin/port-monitor-ctl"
+        chmod +x "/usr/local/bin/port-monitor-ctl"
+        info "管理脚本已更新"
+    else
+        rm -f "/usr/local/bin/port-monitor-ctl.tmp"
+    fi
+
+    # ── 重启服务 ──
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         if systemctl restart "$SERVICE_NAME" 2>&1; then
             info "服务已重启"
@@ -755,6 +805,31 @@ do_update() {
     fi
 
     echo ""
+    printf '%b\n' "${GREEN}${BOLD}═══ 更新完成：v${current_ver} → v${remote_ver} ═══${NC}"
+}
+
+# 版本比较：$1 >= $2 返回 0
+_version_gte() {
+    local IFS='.'
+    local -a v1=($1) v2=($2)
+    for i in 0 1 2; do
+        local a=${v1[$i]:-0} b=${v2[$i]:-0}
+        if [ "$a" -gt "$b" ] 2>/dev/null; then return 0; fi
+        if [ "$a" -lt "$b" ] 2>/dev/null; then return 1; fi
+    done
+    return 0
+}
+
+_do_local_update() {
+    local backup="/tmp/port-monitor.bak.$(date +%s)"
+    cp "$INSTALL_DIR/port-monitor" "$backup"
+    info "已备份旧版本到 $backup"
+    rm -f "$INSTALL_DIR/port-monitor"
+    install -m 755 ./port-monitor "$INSTALL_DIR/port-monitor"
+    info "程序文件已更新"
+    if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+        systemctl restart "$SERVICE_NAME" 2>&1 && info "服务已重启" || error "重启失败"
+    fi
     info "更新完成"
 }
 

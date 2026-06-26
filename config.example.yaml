@@ -170,7 +170,7 @@ autopilot:
   backup_interval: 24h         # 备份间隔
   backup_keep_count: 7         # 保留备份数量
   backup_dir: "/var/lib/port-monitor/backups"
-  # 自动更新：检查 GitHub 新版本
-  auto_update: false           # 仅检查，不自动安装
-  update_check_interval: 24h
-  auto_update_apply: false     # 自动安装更新（谨慎开启）
+  # 自动更新：发现新版本自动下载并重启
+  auto_update: true            # 启用版本检查
+  update_check_interval: 12h   # 检查间隔
+  auto_update_apply: true      # 发现新版本自动安装

@@ -1800,57 +1800,91 @@ class Autopilot:
         self._last_update_check = now
         self._check_update()
 
+    @staticmethod
+    def _version_tuple(v):
+        """将版本号字符串转为可比较的元组，如 '1.2.3' -> (1, 2, 3)。"""
+        try:
+            return tuple(int(x) for x in v.strip().split("."))
+        except (ValueError, AttributeError):
+            return (0, 0, 0)
+
     def _check_update(self):
-        """检查 GitHub 最新版本。"""
+        """检查 GitHub 最新版本，发现更新则自动应用（如启用）。"""
         try:
             req = urllib.request.Request(self._GITHUB_API, method="GET")
             req.add_header("Accept", "application/vnd.github.v3+json")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
-                tag = data.get("tag_name", "").lstrip("v")
-                if tag and tag != self._current_version:
-                    logger.info("Autopilot: 发现新版本 %s (当前 %s)", tag, self._current_version)
+                remote_tag = data.get("tag_name", "").lstrip("v")
+                if not remote_tag:
+                    return
+                remote_ver = self._version_tuple(remote_tag)
+                local_ver = self._version_tuple(self._current_version)
+                if remote_ver > local_ver:
+                    logger.info("Autopilot: 发现新版本 v%s (当前 v%s)", remote_tag, self._current_version)
                     self._engine.alerter.enqueue(
                         f"📦 PortSentinel 新版本可用\n"
                         f"当前: v{self._current_version}\n"
-                        f"最新: v{tag}\n"
-                        f"运行 `pm update` 或 `sudo port-monitor.sh update` 升级")
+                        f"最新: v{remote_tag}\n"
+                        f"运行 `pm update` 升级")
                     if self._update_auto_apply:
-                        self._do_auto_update(tag)
+                        self._do_auto_update(remote_tag)
+                else:
+                    logger.debug("Autopilot: 已是最新版本 v%s", self._current_version)
         except Exception as e:
             logger.debug("Autopilot 版本检查失败: %s", e)
 
     def _do_auto_update(self, target_version):
-        """自动下载并应用更新（谨慎使用）。"""
+        """自动下载并应用更新。"""
+        backup = None
+        target = "/usr/local/bin/port-monitor"
         try:
             logger.info("Autopilot: 正在自动更新到 v%s...", target_version)
+            # 备份当前版本
+            import shutil
+            backup = f"/tmp/port-monitor.bak.{int(time.time())}"
+            shutil.copy2(target, backup)
+            # 下载新版本
             url = f"https://raw.githubusercontent.com/{self._GITHUB_REPO}/main/port-monitor"
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=30) as resp:
                 new_code = resp.read()
-            # 备份当前版本
-            backup = f"/tmp/port-monitor.bak.{int(time.time())}"
-            import shutil
-            shutil.copy2("/usr/local/bin/port-monitor", backup)
-            # 写入新版本
-            target = "/usr/local/bin/port-monitor"
-            with open(target, "wb") as f:
+            # 原子替换
+            tmp = target + ".tmp"
+            with open(tmp, "wb") as f:
                 f.write(new_code)
-            os.chmod(target, 0o755)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, target)
+            # 同时更新管理脚本
+            sh_url = f"https://raw.githubusercontent.com/{self._GITHUB_REPO}/main/port-monitor.sh"
+            try:
+                req2 = urllib.request.Request(sh_url, method="GET")
+                with urllib.request.urlopen(req2, timeout=30) as resp2:
+                    sh_code = resp2.read()
+                sh_target = "/usr/local/bin/port-monitor-ctl"
+                with open(sh_target + ".tmp", "wb") as f:
+                    f.write(sh_code)
+                os.replace(sh_target + ".tmp", sh_target)
+            except Exception:
+                pass  # 管理脚本更新失败不影响主程序
             # 重启服务
             subprocess.run(["systemctl", "restart", "port-monitor"], timeout=10)
-            logger.info("Autopilot: 更新完成，服务已重启")
+            logger.info("Autopilot: 更新到 v%s 完成，服务已重启", target_version)
+            self._engine.alerter.enqueue(
+                f"✅ PortSentinel 已自动更新\n"
+                f"v{self._current_version} → v{target_version}\n"
+                f"服务已重启")
         except Exception as e:
             logger.error("Autopilot 自动更新失败: %s", e)
-            # 尝试回滚
-            try:
-                if os.path.exists(backup):
+            # 回滚
+            if backup and os.path.exists(backup):
+                try:
                     import shutil
                     shutil.copy2(backup, target)
                     subprocess.run(["systemctl", "restart", "port-monitor"], timeout=10)
-                    logger.info("Autopilot: 已回滚到旧版本")
-            except Exception:
-                pass
+                    logger.info("Autopilot: 已回滚到 v%s", self._current_version)
+                except Exception:
+                    pass
 
     @property
     def status(self):
