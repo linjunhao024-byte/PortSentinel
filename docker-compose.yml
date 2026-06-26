@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  port-sentinel:
+    build: .
+    image: portsentinel:latest
+    container_name: port-sentinel
+    restart: unless-stopped
+
+    # 网络权限：抓包 + iptables 规则
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    network_mode: host  # 必须使用 host 网络才能抓取真实流量
+
+    volumes:
+      # 配置文件（必须挂载）
+      - ./config:/etc/port-monitor:ro
+      # 数据持久化
+      - port-sentinel-data:/var/lib/port-monitor
+      # 日志
+      - port-sentinel-logs:/var/log/port-monitor
+
+    environment:
+      - TZ=Asia/Shanghai
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  port-sentinel-data:
+    driver: local
+  port-sentinel-logs:
+    driver: local

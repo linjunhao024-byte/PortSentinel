@@ -1,0 +1,155 @@
+# PortSentinel 配置示例
+# 完整配置参考：https://github.com/linjunhao024-byte/PortSentinel
+
+monitor:
+  interval: 5s
+
+rules:
+  port_scan:
+    window: 10s
+    thresholds:
+      low: 10
+      medium: 20
+      high: 100
+      critical: 1000
+    auto_ban: true
+    ban_duration: 1h
+
+  brute_force:
+    window: 60s
+    auto_ban: true
+    ban_duration: 24h
+    permanent: false
+    sensitive_ports:
+      - port: 22
+        name: "SSH"
+        threshold: 5
+      - port: 3306
+        name: "MySQL"
+        threshold: 10
+      - port: 6379
+        name: "Redis"
+        threshold: 3
+
+  ddos:
+    window: 5s
+    threshold: 1000
+    auto_ban: true
+    ban_duration: 1h
+
+  # 自适应阈值：按时段学习流量基线，动态调整检测灵敏度
+  adaptive:
+    enabled: false
+    learning_period: 30m
+    multiplier: 3.0          # 阈值 = 基线均值 × 倍率
+    anomaly_factor: 10.0     # 流量突增倍率告警
+    recalibrate_interval: 1h
+
+honeypot:
+  enabled: false
+  ports:
+    - 2222
+    - 8888
+    - 33899
+  ban_duration: 7d
+  permanent: false
+  # 每个端口的协议模拟（可选，默认自动猜测）
+  services:
+    "2222": "ssh"
+    "8888": "http"
+    "33899": "redis"
+
+# 威胁情报集成
+threat_intel:
+  enabled: false
+  # AbuseIPDB API Key（可选，注册 https://www.abuseipdb.com/ 获取）
+  abuseipdb_key: ""
+  # 公开情报源同步间隔
+  sync_interval: 6h
+
+# 攻击行为关联分析
+correlation:
+  enabled: false
+  # 关联时间窗口
+  window: 10m
+
+# 自定义响应动作
+response:
+  enabled: false
+  actions:
+    # Webhook 示例
+    - type: webhook
+      url: "https://internal.example.com/api/security-event"
+      method: POST
+      body: '{"ip":"{{src_ip}}","type":"{{attack_type}}","port":{{dst_port}},"time":"{{time}}"}'
+    # 脚本示例
+    # - type: script
+    #   path: "/opt/scripts/notify-soc.sh"
+    #   args: ["{{src_ip}}", "{{attack_type}}"]
+
+api:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8900
+  token: "change-me-to-a-secure-token"
+
+federation:
+  enabled: false
+  sync_interval: 60s
+  # 集群标识
+  node_id: ""
+  # 集群共享密钥
+  cluster_secret: ""
+  peers: []
+    # - url: "http://10.0.0.2:8900"
+    #   token: "peer-token"
+
+alert:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+
+  dingtalk:
+    enabled: false
+    webhook: ""
+    secret: ""
+
+  email:
+    enabled: false
+    smtp_host: ""
+    smtp_port: 465
+    username: ""
+    password: ""
+    to: ""
+
+  # 企业微信（飞书/Lark）
+  wechat:
+    enabled: false
+    webhook: ""
+
+  # 飞书（Lark）
+  feishu:
+    enabled: false
+    webhook: ""
+    secret: ""
+
+  # Slack
+  slack:
+    enabled: false
+    webhook: ""
+
+  log:
+    enabled: true
+    path: "/var/log/port-monitor/port-monitor.log"
+
+storage:
+  sqlite:
+    path: "/var/lib/port-monitor/monitor.db"
+
+ban:
+  method: "iptables"
+  mode: "drop"          # drop=直接丢弃 | reject=拒绝并回复 | rate_limit=限速
+  whitelist:
+    - "127.0.0.1"
+    - "::1"

@@ -1,21 +1,19 @@
 #!/bin/bash
 
-# 端口安全监控 - 一体化管理脚本 v1.0.0
+# 端口安全监控 - 一体化管理脚本 v1.0.2
 
-set -e
-
-PORTMONITOR_VERSION="1.0.0"
+PORTMONITOR_VERSION="1.0.2"
 
 # ── 启动依赖检测 ─────────────────────────────────────────────
 
 _check_deps() {
     local missing=()
 
-    [ "$(uname -s)" != "Linux" ] && echo -e "\033[0;31m[✗]\033[0m 仅支持 Linux 系统 [当前: $(uname -s)]" && exit 1
+    [ "$(uname -s)" != "Linux" ] && printf '%b\n' "\033[0;31m[✗]\033[0m 仅支持 Linux 系统 [当前: $(uname -s)]" && exit 1
 
-    [ -z "$BASH_VERSION" ] && echo -e "\033[0;31m[✗]\033[0m 需要 bash 环境" && exit 1
+    [ -z "$BASH_VERSION" ] && printf '%b\n' "\033[0;31m[✗]\033[0m 需要 bash 环境" && exit 1
     local bash_major="${BASH_VERSINFO[0]}"
-    [ "$bash_major" -lt 4 ] && echo -e "\033[0;31m[✗]\033[0m 需要 bash 4.0+[当前: ${BASH_VERSION}]" && exit 1
+    [ "$bash_major" -lt 4 ] && printf '%b\n' "\033[0;31m[✗]\033[0m 需要 bash 4.0+[当前: ${BASH_VERSION}]" && exit 1
 
     for cmd in python3 systemctl sqlite3 curl awk sed grep tr openssl; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
@@ -26,12 +24,12 @@ _check_deps() {
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "\033[0;31m[✗]\033[0m 缺少必要依赖:"
+        printf '%b\n' "\033[0;31m[✗]\033[0m 缺少必要依赖:"
         for m in "${missing[@]}"; do
-            echo -e "  • $m"
+            printf '%b\n' "  • $m"
         done
         echo ""
-        echo -e "\033[1;33m安装参考:\033[0m"
+        printf '%b\n' "\033[1;33m安装参考:\033[0m"
         echo "  Debian/Ubuntu:  apt install python3 sqlite3 curl iptables openssl"
         echo "  CentOS/RHEL:    yum install python3 sqlite curl iptables"
         echo "  Arch:           pacman -S python sqlite curl iptables"
@@ -48,6 +46,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
 
@@ -62,25 +61,25 @@ SHORTCUT_FILE="${CONFIG_DIR}/.shortcut_name"
 _ROLLBACK_ITEMS=()
 
 _install_rollback() {
-    echo -e "\n${RED}[✗] 安装中断，正在回滚...${NC}"
+    printf '%b\n' "\n${RED}[✗] 安装中断，正在回滚...${NC}"
     local protected_dirs=("$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR")
     for item in "${_ROLLBACK_ITEMS[@]}"; do
         local is_protected=false
         for pd in "${protected_dirs[@]}"; do
             [ "$item" = "$pd" ] && is_protected=true && break
         done
-        $is_protected && continue
+        [ "$is_protected" = true ] && continue
         rm -rf "$item" 2>/dev/null || true
     done
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    echo -e "${YELLOW}[!] 已清理安装残留${NC}"
+    printf '%b\n' "${YELLOW}[!] 已清理安装残留${NC}"
     exit 1
 }
 
 print_banner() {
     clear
-    echo -e "${BLUE}${BOLD}"
+    printf '%b\n' "${BLUE}${BOLD}"
     printf '%s\n' "╔═══════════════════════════════════════════════════════════════╗"
     printf '%s\n' "║                                                               ║"
     printf '%s\n' "║            端口安全监控管理系统                               ║"
@@ -88,16 +87,16 @@ print_banner() {
     printf '%s\n' "║       检测端口扫描 | 防御暴力破解 | 自动封禁攻击IP           ║"
     printf '%s\n' "║                                                               ║"
     printf '%s\n' "╚═══════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    printf '%b\n' "${NC}"
 }
 
 print_step() {
-    echo -e "\n${CYAN}━━━ $1 ━━━${NC}\n"
+    printf '%b\n' "\n${CYAN}━━━ $1 ━━━${NC}\n"
 }
 
-info() { echo -e "${GREEN}[✓]${NC} $1" >&2; return 0; }
-warn() { echo -e "${YELLOW}[!]${NC} $1" >&2; return 0; }
-error() { echo -e "${RED}[✗]${NC} $1" >&2; return 0; }
+info() { printf '%b\n' "${GREEN}[✓]${NC} $1" >&2; return 0; }
+warn() { printf '%b\n' "${YELLOW}[!]${NC} $1" >&2; return 0; }
+error() { printf '%b\n' "${RED}[✗]${NC} $1" >&2; return 0; }
 
 # 必填输入：不允许空值
 ask() {
@@ -105,9 +104,9 @@ ask() {
     local input=""
     while true; do
         if [ -n "$default" ]; then
-            echo -n -e "${YELLOW}${prompt} [${default}]: ${NC}" >&2
+            printf '%b' "${YELLOW}${prompt} [${default}]: ${NC}" >&2
         else
-            echo -n -e "${YELLOW}${prompt}: ${NC}" >&2
+            printf '%b' "${YELLOW}${prompt}: ${NC}" >&2
         fi
         read -r input
         if [ -n "$input" ]; then
@@ -126,9 +125,9 @@ ask_optional() {
     local prompt="$1" default="$2"
     local input=""
     if [ -n "$default" ]; then
-        echo -n -e "${YELLOW}${prompt} [${default}]: ${NC}" >&2
+        printf '%b' "${YELLOW}${prompt} [${default}]: ${NC}" >&2
     else
-        echo -n -e "${YELLOW}${prompt}: ${NC}" >&2
+        printf '%b' "${YELLOW}${prompt}: ${NC}" >&2
     fi
     read -r input
     echo "${input:-$default}"
@@ -138,7 +137,7 @@ ask_yn() {
     local prompt="$1" default="${2:-n}"
     local input=""
     while true; do
-        echo -n -e "${YELLOW}${prompt} [$([ "$default" = "y" ] && echo "Y/n" || echo "y/N")]: ${NC}" >&2
+        printf '%b' "${YELLOW}${prompt} [$([ "$default" = "y" ] && echo "Y/n" || echo "y/N")]: ${NC}" >&2
         read -r input
         input=$(echo "${input:-$default}" | tr '[:upper:]' '[:lower:]')
         [[ "$input" =~ ^[yn]$ ]] && echo "$input" && return
@@ -152,12 +151,12 @@ ask_choice() {
     local options=("$@")
     local count=${#options[@]}
     local choice=""
-    echo -e "${YELLOW}${prompt}${NC}" >&2
+    printf '%b\n' "${YELLOW}${prompt}${NC}" >&2
     for i in "${!options[@]}"; do
-        echo -e "  ${CYAN}[$((i+1))]${NC} ${options[$i]}" >&2
+        printf '%b\n' "  ${CYAN}[$((i+1))]${NC} ${options[$i]}" >&2
     done
     while true; do
-        echo -n -e "${GREEN}请选择 [1-${count}]: ${NC}" >&2
+        printf '%b' "${GREEN}请选择 [1-${count}]: ${NC}" >&2
         read -r choice
         choice="${choice:-1}"
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
@@ -173,6 +172,62 @@ check_root() {
         error "需要root权限，请使用: sudo $0"
         exit 1
     fi
+}
+
+# 判断是否为 IPv6 地址（含冒号即为 IPv6）
+_is_ipv6() {
+    [[ "$1" == *:* ]]
+}
+
+# 统一 IP/CIDR 验证：支持 IPv4、IPv6 和 CIDR 格式
+_validate_ip() {
+    local ip="$1"
+    # 去除 CIDR 前缀进行验证
+    local addr="${ip%/*}"
+    if _is_ipv6 "$addr"; then
+        # IPv6：验证十六进制和冒号组成
+        [[ "$addr" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+        [[ "$addr" != *":::"* ]] || return 1
+        # 计算冒号数量，判断组数
+        local colons="${addr//[^:]}"
+        local colon_count=${#colons}
+        if [[ "$addr" == *"::"* ]]; then
+            # 压缩格式：最多 7 个冒号
+            [ "$colon_count" -le 7 ] || return 1
+            # :: 最多出现一次
+            local tmp="${addr/::/}"
+            [[ "$tmp" != *"::"* ]] || return 1
+        else
+            # 完整格式：必须恰好 7 个冒号（8 组）
+            [ "$colon_count" -eq 7 ] || return 1
+        fi
+        # 检查每组最多 4 个十六进制数字
+        local IFS=':'
+        for group in $addr; do
+            [ ${#group} -le 4 ] || return 1
+        done
+        return 0
+    else
+        # IPv4：严格验证，拒绝前导零
+        printf '%s\n' "$addr" | grep -qE '^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])$'
+    fi
+}
+
+# 端口 → 服务名映射（常见端口）
+_port_service() {
+    local port="$1"
+    case "$port" in
+        20) echo "FTP-Data" ;; 21) echo "FTP" ;; 22) echo "SSH" ;; 23) echo "Telnet" ;;
+        25) echo "SMTP" ;; 53) echo "DNS" ;; 80) echo "HTTP" ;; 110) echo "POP3" ;;
+        143) echo "IMAP" ;; 443) echo "HTTPS" ;; 445) echo "SMB" ;; 465) echo "SMTPS" ;;
+        587) echo "SMTP-Sub" ;; 993) echo "IMAPS" ;; 995) echo "POP3S" ;;
+        1433) echo "MSSQL" ;; 1521) echo "Oracle" ;; 3306) echo "MySQL" ;;
+        3389) echo "RDP" ;; 5432) echo "PostgreSQL" ;; 5900) echo "VNC" ;;
+        6379) echo "Redis" ;; 6443) echo "K8s-API" ;; 8080) echo "HTTP-Alt" ;;
+        8443) echo "HTTPS-Alt" ;; 8888) echo "HTTP-Alt2" ;; 9090) echo "Prometheus" ;;
+        9200) echo "ES" ;; 11211) echo "Memcached" ;; 27017) echo "MongoDB" ;;
+        *) echo "" ;;
+    esac
 }
 
 # 优先读配置，读不到则自动检测防火墙类型
@@ -198,24 +253,25 @@ get_firewall_backend() {
 
 do_install() {
     print_banner
-    echo -e "${CYAN}${BOLD}安装向导${NC} - 4 步完成部署\n"
+    printf '%b\n' "${CYAN}${BOLD}安装向导${NC} - 4 步完成部署\n"
 
     check_root
 
     if [ ! -f "./port-monitor" ]; then
         error "未找到 port-monitor 可执行文件"
-        echo -e "${YELLOW}请从 GitHub 下载:${NC}"
-        echo -e "  wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor"
+        printf '%b\n' "${YELLOW}请从 GitHub 下载:${NC}"
+        printf '%b\n' "  wget -qO port-monitor https://raw.githubusercontent.com/linjunhao024-byte/PortSentinel/main/port-monitor"
         exit 1
     fi
 
-    trap _install_rollback ERR INT TERM
+    set -e
+    trap '_install_rollback' ERR INT TERM
     SHORTCUT="pm"
 
     # ── 步骤 1: 服务器环境 ──
     print_step "步骤 1/4: 服务器环境"
-    echo -e "  ${YELLOW}[1]${NC} 云服务器 - 自动忽略内网流量，避免误报"
-    echo -e "  ${YELLOW}[2]${NC} 独立服务器/VPS - 监控全部流量"
+    printf '%b\n' "  ${YELLOW}[1]${NC} 云服务器 - 自动忽略内网流量，避免误报"
+    printf '%b\n' "  ${YELLOW}[2]${NC} 独立服务器/VPS - 监控全部流量"
     echo ""
     local env_choice
     env_choice=$(ask_choice "请选择" "云服务器 [阿里云/腾讯云/华为云]" "独立服务器/VPS")
@@ -250,10 +306,10 @@ do_install() {
     EMAIL_TO=""
 
     if [ "$(ask_yn "是否配置告警通知？" "y")" = "y" ]; then
-        echo -e "  ${YELLOW}[1]${NC} Telegram"
-        echo -e "  ${YELLOW}[2]${NC} 钉钉"
-        echo -e "  ${YELLOW}[3]${NC} 邮件"
-        echo -e "  ${YELLOW}[4]${NC} 全部"
+        printf '%b\n' "  ${YELLOW}[1]${NC} Telegram"
+        printf '%b\n' "  ${YELLOW}[2]${NC} 钉钉"
+        printf '%b\n' "  ${YELLOW}[3]${NC} 邮件"
+        printf '%b\n' "  ${YELLOW}[4]${NC} 全部"
         echo ""
         local alert_choice
         alert_choice=$(ask_choice "选择告警通道" "Telegram" "钉钉" "邮件" "全部配置")
@@ -263,7 +319,7 @@ do_install() {
             while true; do
                 TELEGRAM_BOT_TOKEN=$(ask "机器人 Token")
                 TELEGRAM_CHAT_ID=$(ask "聊天 ID")
-                echo -e "${CYAN}验证中...${NC}" >&2
+                printf '%b\n' "${CYAN}验证中...${NC}" >&2
                 local tg_resp
                 tg_resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                     -d chat_id="$TELEGRAM_CHAT_ID" \
@@ -284,13 +340,13 @@ do_install() {
             while true; do
                 DINGTALK_WEBHOOK=$(ask "Webhook 地址")
                 DINGTALK_SECRET=$(ask_optional "签名密钥 [可选]" "")
-                echo -e "${CYAN}验证中...${NC}" >&2
+                printf '%b\n' "${CYAN}验证中...${NC}" >&2
                 local ding_url="$DINGTALK_WEBHOOK"
                 if [ -n "$DINGTALK_SECRET" ]; then
                     local ts_ms sign_str sign
                     ts_ms=$(date +%s%3N)
                     sign_str="${ts_ms}\n${DINGTALK_SECRET}"
-                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | sed 's/+/-/g;s/\//_/g;s/=//g')
+                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
                     ding_url="${DINGTALK_WEBHOOK}&timestamp=${ts_ms}&sign=${sign}"
                 fi
                 local ding_resp
@@ -322,20 +378,20 @@ do_install() {
                 EMAIL_USER=$(ask "发件人邮箱")
                 EMAIL_PASS=$(ask "密码/授权码")
                 EMAIL_TO=$(ask "收件人邮箱")
-                echo -e "${CYAN}验证中...${NC}" >&2
+                printf '%b\n' "${CYAN}验证中...${NC}" >&2
                 local curl_proto="smtp"
                 [ "$EMAIL_PORT" = "465" ] && curl_proto="smtps"
-                local mail_resp
-                mail_resp=$(echo -e "Subject: PortSentinel 告警测试\nContent-Type: text/plain; charset=UTF-8\n\n🧪 PortSentinel 告警测试" | \
+                local mail_resp curl_exit=0
+                mail_resp=$(printf '%b\n' "Subject: PortSentinel 告警测试\nContent-Type: text/plain; charset=UTF-8\n\n🧪 PortSentinel 告警测试" | \
                     curl -s --url "${curl_proto}://${EMAIL_HOST}:${EMAIL_PORT}" \
                     --ssl-reqd --mail-from "$EMAIL_USER" --mail-rcpt "$EMAIL_TO" \
                     --user "${EMAIL_USER}:${EMAIL_PASS}" \
-                    --connect-timeout 10 --max-time 15 -T - 2>&1)
-                if [ -z "$mail_resp" ] || ! echo "$mail_resp" | grep -qi 'error\|denied\|fail\|535\|550\|553'; then
+                    --connect-timeout 10 --max-time 15 -T - 2>&1) || curl_exit=$?
+                if [ "$curl_exit" -eq 0 ] && ! echo "$mail_resp" | grep -qi 'denied\|535\|550\|553'; then
                     info "邮件验证成功"
                     return
                 else
-                    error "发送失败: $mail_resp"
+                    error "发送失败: ${mail_resp:-curl 退出码 $curl_exit}"
                     [ "$(ask_yn "重新输入？" "y")" != "y" ] && ENABLE_EMAIL="n" && warn "已跳过" && return
                 fi
             done
@@ -353,9 +409,9 @@ do_install() {
 
     # ── 步骤 3: 检测规则 ──
     print_step "步骤 3/4: 检测规则"
-    echo -e "  ${YELLOW}[1]${NC} 严格 - 10端口/10秒, 3次SSH/分钟"
-    echo -e "  ${YELLOW}[2]${NC} 正常 - 20端口/10秒, 5次SSH/分钟 [推荐]"
-    echo -e "  ${YELLOW}[3]${NC} 宽松 - 50端口/10秒, 10次SSH/分钟"
+    printf '%b\n' "  ${YELLOW}[1]${NC} 严格 - 10端口/10秒, 3次SSH/分钟"
+    printf '%b\n' "  ${YELLOW}[2]${NC} 正常 - 20端口/10秒, 5次SSH/分钟 [推荐]"
+    printf '%b\n' "  ${YELLOW}[3]${NC} 宽松 - 50端口/10秒, 10次SSH/分钟"
     echo ""
     local sensitivity
     sensitivity=$(ask_choice "检测灵敏度" "严格" "正常 [推荐]" "宽松")
@@ -368,12 +424,12 @@ do_install() {
 
     # ── 步骤 4: 确认安装 ──
     print_step "步骤 4/4: 确认安装"
-    echo -e "  服务器: $([ "$MONITOR_MODE" = "cloud" ] && echo -e "${GREEN}云服务器${NC}" || echo -e "${GREEN}独立服务器${NC}")"
-    echo -e "  告警: $([ "$ENABLE_TELEGRAM" = "y" ] && echo -n "TG " ; [ "$ENABLE_DINGTALK" = "y" ] && echo -n "钉钉 " ; [ "$ENABLE_EMAIL" = "y" ] && echo -n "邮件 " ; [ "$ENABLE_TELEGRAM" = "n" ] && [ "$ENABLE_DINGTALK" = "n" ] && [ "$ENABLE_EMAIL" = "n" ] && echo -n "未配置")"
+    printf '%b\n' "  服务器: $([ "$MONITOR_MODE" = "cloud" ] && printf '%b\n' "${GREEN}云服务器${NC}" || printf '%b\n' "${GREEN}独立服务器${NC}")"
+    printf '%b\n' "  告警: $([ "$ENABLE_TELEGRAM" = "y" ] && echo -n "TG " ; [ "$ENABLE_DINGTALK" = "y" ] && echo -n "钉钉 " ; [ "$ENABLE_EMAIL" = "y" ] && echo -n "邮件 " ; [ "$ENABLE_TELEGRAM" = "n" ] && [ "$ENABLE_DINGTALK" = "n" ] && [ "$ENABLE_EMAIL" = "n" ] && echo -n "未配置")"
     echo ""
-    [ "$(ask_yn "确认安装？" "y")" != "y" ] && warn "已取消" && trap - ERR INT TERM && exit 0
+    [ "$(ask_yn "确认安装？" "y")" != "y" ] && warn "已取消" && trap - ERR INT TERM && set +e && exit 0
 
-    echo -e "\n${CYAN}正在部署...${NC}"
+    printf '%b\n' "\n${CYAN}正在部署...${NC}"
 
     mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     _ROLLBACK_ITEMS+=("$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR")
@@ -392,11 +448,12 @@ do_install() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     trap - ERR INT TERM
+    set +e
     info "部署完成"
 
     echo ""
-    echo -e "  ${GREEN}快捷命令:${NC} pm"
-    echo -e "  ${GREEN}使用方法:${NC} 终端输入 pm 即可打开管理面板"
+    printf '%b\n' "  ${GREEN}快捷命令:${NC} pm"
+    printf '%b\n' "  ${GREEN}使用方法:${NC} 终端输入 pm 即可打开管理面板"
     echo ""
 
     if [ "$(ask_yn "现在启动服务？" "y")" = "y" ]; then
@@ -466,6 +523,60 @@ rules:
     window: 5s
     threshold: 1000
     auto_ban: $([ "$ENABLE_AUTO_BAN" = "y" ] && echo "true" || echo "false")
+    ban_duration: 1h
+
+  # 自适应阈值：学习期采集流量基线，动态调整检测灵敏度
+  # 适用于流量波动大的环境，可减少误报
+  adaptive:
+    enabled: false
+    learning_period: 30m     # 学习期时长
+    multiplier: 3.0          # 阈值 = 基线均值 × 倍率（越大越宽松）
+    anomaly_factor: 10.0     # 流量突增倍率告警
+    recalibrate_interval: 1h # 重新校准间隔
+
+# 蜜罐端口：任何连接这些端口的 IP 将被立即封禁（零容忍）
+honeypot:
+  enabled: false
+  ports:
+    - 2222
+    - 8888
+    - 33899
+  ban_duration: 7d
+  permanent: false
+
+# 轻量 HTTP API 接口（可选）
+api:
+  enabled: false
+  host: "127.0.0.1"       # 监听地址（生产环境建议 127.0.0.1）
+  port: 8900              # 监听端口
+  token: ""               # API Token（空=无认证，生产环境务必设置）
+
+# 分布式联动（可选）：多节点共享封禁列表
+# 需要对端节点启用 API 服务
+federation:
+  enabled: false
+  sync_interval: 60s       # 同步间隔
+  node_id: ""              # 节点标识（留空使用 hostname）
+  cluster_secret: ""       # 集群共享密钥
+  peers:
+    # - url: "http://10.0.0.2:8900"
+    #   token: "peer-token"
+
+# 威胁情报集成
+threat_intel:
+  enabled: false
+  abuseipdb_key: ""        # AbuseIPDB API Key
+  sync_interval: 6h
+
+# 攻击行为关联分析
+correlation:
+  enabled: false
+  window: 10m
+
+# 自定义响应动作
+response:
+  enabled: false
+  actions: []
 
 alert:
   telegram:
@@ -486,9 +597,31 @@ alert:
     password: "$(_yaml_escape "$EMAIL_PASS")"
     to: "$(_yaml_escape "$EMAIL_TO")"
 
+  wechat:
+    enabled: false
+    webhook: ""
+
+  feishu:
+    enabled: false
+    webhook: ""
+    secret: ""
+
+  slack:
+    enabled: false
+    webhook: ""
+
   log:
     enabled: true
     path: "${LOG_DIR}/port-monitor.log"
+
+  # 告警模板（可选，注释则使用内置默认模板）
+  # 可用变量: {{src_ip}} {{attack_type}} {{dst_port}} {{count}} {{window}}
+  #           {{level}} {{duration}} {{time}} {{hostname}} {{service_name}}
+  # templates:
+  #   ban: "🚨 自动封禁 | {{src_ip}} | {{attack_type}} | :{{dst_port}} | {{duration}}"
+  #   port_scan: "🚨 端口扫描 [{{level}}] from {{src_ip}} | {{count}} ports/{{window}}s"
+  #   brute_force: "🚨 {{service_name}} 暴力破解 | {{src_ip}} | {{count}} attempts/{{window}}s"
+  #   ddos: "🚨 DDoS | {{src_ip}} | {{count}} SYN/{{window}}s"
 
 storage:
   type: "both"
@@ -500,6 +633,7 @@ storage:
 
 ban:
   method: "$BAN_METHOD"
+  # mode: "drop"       # drop=直接丢弃 | reject=拒绝并回复 | rate_limit=限速（允许低频访问）
   whitelist:
     - "127.0.0.1"
     - "::1"
@@ -509,6 +643,8 @@ $([ "$IGNORE_INTERNAL" = "y" ] && cat << 'WHITELIST'
     - "172.16.0.0/12"
     - "192.168.0.0/16"
     - "169.254.0.0/16"
+    - "fe80::/10"
+    - "fc00::/7"
 WHITELIST
 )
 EOF
@@ -555,7 +691,7 @@ do_update() {
 
     if [ ! -f "./port-monitor" ]; then
         error "当前目录未找到 port-monitor 可执行文件"
-        echo -e "${YELLOW}请将新版 port-monitor 放到当前目录后重试${NC}"
+        printf '%b\n' "${YELLOW}请将新版 port-monitor 放到当前目录后重试${NC}"
         exit 1
     fi
 
@@ -564,7 +700,7 @@ do_update() {
         exit 1
     fi
 
-    echo -e "${CYAN}将更新 PortSentinel 程序文件[配置和数据保留不变]${NC}\n"
+    printf '%b\n' "${CYAN}将更新 PortSentinel 程序文件[配置和数据保留不变]${NC}\n"
 
     local backup="/tmp/port-monitor.bak.$(date +%s)"
     cp "$INSTALL_DIR/port-monitor" "$backup"
@@ -591,7 +727,7 @@ do_update() {
 
 do_uninstall() {
     check_root
-    echo -e "${RED}警告: 将卸载服务[保留配置和数据]${NC}"
+    printf '%b\n' "${RED}警告: 将卸载服务[保留配置和数据]${NC}"
     if [ "$(ask_yn "确定卸载？" "n")" != "y" ]; then return; fi
 
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -619,7 +755,7 @@ do_uninstall() {
 
 do_full_uninstall() {
     check_root
-    echo -e "${RED}警告: 将删除所有文件，包括配置和数据！${NC}"
+    printf '%b\n' "${RED}警告: 将删除所有文件，包括配置和数据！${NC}"
     if [ "$(ask_yn "确定完全卸载？" "n")" != "y" ]; then return; fi
 
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -677,14 +813,43 @@ do_status() {
 }
 
 do_logs() {
-    echo -e "${YELLOW}按 Ctrl+C 退出${NC}"
+    printf '%b\n' "${YELLOW}按 Ctrl+C 退出${NC}"
     journalctl -u "$SERVICE_NAME" -f --no-pager || true
+}
+
+do_reload() {
+    check_root
+    if ! systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+        error "服务未运行，请先启动"
+        return 1
+    fi
+    local pid
+    pid=$(pgrep -x "port-monitor" || true)
+    if [ -z "$pid" ]; then
+        error "未找到 port-monitor 进程"
+        return 1
+    fi
+    kill -HUP "$pid" 2>/dev/null
+    if [ $? -eq 0 ]; then
+        info "已发送 SIGHUP，配置热加载中..."
+        sleep 1
+        # 检查进程是否仍在运行（热加载不应导致退出）
+        if kill -0 "$pid" 2>/dev/null; then
+            info "热加载完成，服务运行正常 [PID: $pid]"
+        else
+            error "热加载后进程退出，请检查配置和日志"
+        fi
+    else
+        error "发送信号失败"
+    fi
 }
 
 do_edit_config() {
     check_root
     ${EDITOR:-vi} "$CONFIG_FILE" || true
-    if [ "$(ask_yn "重启服务使配置生效？" "y")" = "y" ]; then
+    if [ "$(ask_yn "热加载配置？(选否则重启服务)" "y")" = "y" ]; then
+        do_reload
+    else
         do_restart
     fi
 }
@@ -693,18 +858,19 @@ do_view_bans() {
     check_root
     local backend
     backend=$(get_firewall_backend)
-    echo -e "${CYAN}当前封禁的IP (${backend}):${NC}"
+    printf '%b\n' "${CYAN}当前封禁的IP (${backend}):${NC}"
 
     local ips=""
     case "$backend" in
         iptables)
             ips=$(iptables -L INPUT -n 2>/dev/null | grep DROP | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
+            ips+=$'\n'$(ip6tables -L INPUT -n 2>/dev/null | grep DROP | grep -oE '([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}' || true)
             ;;
         firewalld)
-            ips=$(firewall-cmd --list-rich-rules 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
+            ips=$(firewall-cmd --list-rich-rules 2>/dev/null | grep -oP "address='\\K[^']+" || true)
             ;;
         nftables)
-            ips=$(nft list ruleset 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
+            ips=$(nft list ruleset 2>/dev/null | grep -oP '(?:ip|ip6) saddr \K\S+' || true)
             ;;
         *)
             warn "无法检测防火墙后端，请手动检查"
@@ -713,9 +879,9 @@ do_view_bans() {
     esac
 
     if [ -z "$ips" ]; then
-        echo -e "${YELLOW}暂无封禁${NC}"
+        printf '%b\n' "${YELLOW}暂无封禁${NC}"
     else
-        echo "$ips" | sort -u | while read -r ip; do echo -e "  ${RED}$ip${NC}"; done
+        echo "$ips" | sort -u | while read -r ip; do printf '%b\n' "  ${RED}$ip${NC}"; done
     fi
 }
 
@@ -723,21 +889,29 @@ do_unban() {
     check_root
     local ip
     ip=$(ask "要解封的IP")
-    if echo "$ip" | grep -qE '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'; then
+    if _validate_ip "$ip"; then
         local backend
         backend=$(get_firewall_backend)
+        local v6=false
+        _is_ipv6 "$ip" && v6=true
         case "$backend" in
             iptables)
-                iptables -D INPUT -s "$ip" -j DROP 2>/dev/null && info "已解封 $ip" || warn "IP不在封禁列表"
+                local cmd="iptables"
+                $v6 && cmd="ip6tables"
+                $cmd -D INPUT -s "$ip" -j DROP 2>/dev/null && info "已解封 $ip" || warn "IP不在封禁列表"
                 ;;
             firewalld)
-                firewall-cmd --remove-rich-rule="rule family='ipv4' source address='$ip' reject" --permanent 2>/dev/null \
+                local family="ipv4"
+                $v6 && family="ipv6"
+                firewall-cmd --remove-rich-rule="rule family='$family' source address='$ip' reject" --permanent 2>/dev/null \
                     && firewall-cmd --reload 2>/dev/null \
                     && info "已解封 $ip" \
                     || warn "IP不在封禁列表"
                 ;;
             nftables)
-                nft delete rule inet filter input ip saddr "$ip" drop 2>/dev/null \
+                local addr_type="ip"
+                $v6 && addr_type="ip6"
+                nft delete rule inet filter input $addr_type saddr "$ip" drop 2>/dev/null \
                     && info "已解封 $ip" \
                     || warn "IP不在封禁列表"
                 ;;
@@ -748,6 +922,141 @@ do_unban() {
     else
         error "IP格式不正确"
     fi
+}
+
+# ── 白名单管理 ─────────────────────────────────────────────────
+
+_get_whitelist() {
+    # 从配置文件提取白名单条目（去除引号和前导空格）
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return
+    fi
+    # 提取 ban: 段下的 whitelist 列表
+    sed -n '/^ban:/,/^[a-z]/p' "$CONFIG_FILE" 2>/dev/null \
+        | grep '^\s*-\s*"' \
+        | sed 's/^\s*-\s*"//; s/"\s*$//' \
+        | grep -v '^$'
+}
+
+_add_whitelist_entry() {
+    local entry="$1"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        error "配置文件不存在"
+        return 1
+    fi
+    # 检查是否已存在
+    if grep -qF "\"$entry\"" "$CONFIG_FILE" 2>/dev/null; then
+        warn "$entry 已在白名单中"
+        return 0
+    fi
+    # 在 whitelist 段的最后一个条目后插入
+    # 找到 ban: 段中 whitelist: 后的第一个非列表行，在其前插入
+    local line_num
+    line_num=$(grep -n '^\s*-\s*"' "$CONFIG_FILE" | tail -1 | cut -d: -f1)
+    if [ -z "$line_num" ]; then
+        # 没有找到列表项，在 whitelist: 行后插入
+        line_num=$(grep -n 'whitelist:' "$CONFIG_FILE" | head -1 | cut -d: -f1)
+        if [ -z "$line_num" ]; then
+            error "未找到 whitelist 配置段"
+            return 1
+        fi
+        sed -i "${line_num}a\\    - \"${entry}\"" "$CONFIG_FILE"
+    else
+        sed -i "${line_num}a\\    - \"${entry}\"" "$CONFIG_FILE"
+    fi
+    info "已添加白名单: $entry"
+}
+
+_remove_whitelist_entry() {
+    local entry="$1"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        error "配置文件不存在"
+        return 1
+    fi
+    if ! grep -qF "\"$entry\"" "$CONFIG_FILE" 2>/dev/null; then
+        warn "$entry 不在白名单中"
+        return 0
+    fi
+    # 用 grep -nF 定位行号（固定字符串匹配，避免注入），删除最后一个匹配行
+    local line_num
+    line_num=$(grep -nF "\"$entry\"" "$CONFIG_FILE" | tail -1 | cut -d: -f1)
+    if [ -n "$line_num" ]; then
+        sed -i "${line_num}d" "$CONFIG_FILE"
+    fi
+    info "已移除白名单: $entry"
+}
+
+do_manage_whitelist() {
+    check_root
+    print_banner
+    printf '%b\n' "${CYAN}${BOLD}📋 白名单管理${NC}\n"
+
+    while true; do
+        # 显示当前白名单
+        printf '%b\n' "${BOLD}当前白名单:${NC}"
+        local wl_lines=()
+        local idx=0
+        while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            idx=$((idx + 1))
+            wl_lines+=("$entry")
+            printf '%b\n' "  ${CYAN}[$idx]${NC} ${entry}"
+        done <<< "$(_get_whitelist)"
+
+        if [ $idx -eq 0 ]; then
+            printf '%b\n' "  ${YELLOW}(空)${NC}"
+        fi
+
+        echo ""
+        printf '%b\n' "  ${YELLOW}[a]${NC} 添加 IP/CIDR    ${YELLOW}[r]${NC} 删除条目    ${YELLOW}[s]${NC} 热加载生效    ${YELLOW}[q]${NC} 返回"
+        echo ""
+        printf '%b' "${GREEN}请选择: ${NC}"
+        read -r action
+        echo ""
+
+        case "$action" in
+            a|A)
+                local new_entry
+                new_entry=$(ask "输入 IP 或 CIDR (如 10.0.0.0/8 或 2001:db8::1)")
+                if _validate_ip "$new_entry"; then
+                    _add_whitelist_entry "$new_entry"
+                else
+                    error "格式不正确: $new_entry"
+                fi
+                ;;
+            r|R)
+                if [ $idx -eq 0 ]; then
+                    warn "白名单为空"
+                    continue
+                fi
+                local del_idx
+                del_idx=$(ask "输入要删除的编号 [1-${idx}]")
+                if [[ "$del_idx" =~ ^[0-9]+$ ]] && [ "$del_idx" -ge 1 ] && [ "$del_idx" -le $idx ]; then
+                    local del_entry="${wl_lines[$((del_idx - 1))]}"
+                    _remove_whitelist_entry "$del_entry"
+                else
+                    error "无效编号"
+                fi
+                ;;
+            s|S)
+                if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+                    do_reload
+                else
+                    warn "服务未运行，配置将在下次启动时生效"
+                fi
+                ;;
+            q|Q)
+                return 0
+                ;;
+            *)
+                error "无效选择"
+                ;;
+        esac
+
+        echo ""
+        printf '%b' "${YELLOW}按 Enter 继续...${NC}"
+        read -r
+    done
 }
 
 do_test_alert() {
@@ -778,12 +1087,12 @@ do_test_alert() {
         bot_token=$(echo "$tg_section" | grep 'bot_token:' | awk '{print $2}' | tr -d '"')
         chat_id=$(echo "$tg_section" | grep 'chat_id:' | awk '{print $2}' | tr -d '"')
         if [ -n "$bot_token" ] && [ -n "$chat_id" ]; then
-            echo -e "${CYAN}[Telegram]${NC} 发送测试消息..."
+            printf '%b\n' "${CYAN}[Telegram]${NC} 发送测试消息..."
             local resp
             resp=$(curl -s -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
                 -d chat_id="$chat_id" \
                 -d parse_mode="HTML" \
-                -d text="$(echo -e "$test_msg")" \
+                --data-urlencode "text=$(printf '%b\n' "$test_msg")" \
                 --connect-timeout 10 --max-time 15 2>&1)
             if echo "$resp" | grep -q '"ok":true'; then
                 info "Telegram 测试消息发送成功"
@@ -809,14 +1118,14 @@ do_test_alert() {
                 ts_ms=$(date +%s%3N)
                 local sign_str="${ts_ms}\n${secret}"
                 local sign
-                sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | python3 -c "import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || true)
+                sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | python3 -c "import sys,urllib.parse;print(urllib.parse.quote_plus(sys.stdin.read().strip()))" 2>/dev/null || true)
                 if [ -z "$sign" ]; then
-                    # 兜底：无 python3 时用纯 bash url-encode
-                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/-/g;s/\//_/g;s/=//g')
+                    # 兜底：无 python3 时用纯 bash percent-encode
+                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
                 fi
                 full_url="${webhook}&timestamp=${ts_ms}&sign=${sign}"
             fi
-            echo -e "${CYAN}[钉钉]${NC} 发送测试消息..."
+            printf '%b\n' "${CYAN}[钉钉]${NC} 发送测试消息..."
             local ding_body
             ding_body=$(cat << DINGEOF
 {
@@ -852,20 +1161,20 @@ DINGEOF
         password=$(echo "$email_section" | grep 'password:' | awk '{print $2}' | tr -d '"')
         mail_to=$(echo "$email_section" | grep '^\s*to:' | awk '{print $2}' | tr -d '"')
         if [ -n "$smtp_host" ] && [ -n "$username" ] && [ -n "$password" ] && [ -n "$mail_to" ]; then
-            echo -e "${CYAN}[邮件]${NC} 发送测试邮件..."
+            printf '%b\n' "${CYAN}[邮件]${NC} 发送测试邮件..."
             local mail_subject="PortSentinel 告警测试 - ${hostname}"
             local mail_body="主机: ${hostname}\n时间: ${now}\n状态: 连接正常"
             # 优先用 msmtp / sendmail，回退到 curl SMTP
             if command -v msmtp &>/dev/null; then
-                printf "To: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s" \
+                printf "To: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%b" \
                     "$mail_to" "$mail_subject" "$mail_body" | msmtp "$mail_to" 2>&1 && info "邮件测试发送成功 (msmtp)" || error "邮件发送失败"
             elif command -v sendmail &>/dev/null; then
-                printf "To: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s" \
+                printf "To: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%b" \
                     "$mail_to" "$mail_subject" "$mail_body" | sendmail "$mail_to" 2>&1 && info "邮件测试发送成功 (sendmail)" || error "邮件发送失败"
             else
                 local curl_proto="smtp"
                 [ "$smtp_port" = "465" ] && curl_proto="smtps"
-                echo -e "Subject: ${mail_subject}\nContent-Type: text/plain; charset=UTF-8\n\n${mail_body}" | \
+                printf '%b\n' "To: ${mail_to}\nSubject: ${mail_subject}\nContent-Type: text/plain; charset=UTF-8\n\n${mail_body}" | \
                     curl -s --url "${curl_proto}://${smtp_host}:${smtp_port}" \
                     --ssl-reqd \
                     --mail-from "$username" \
@@ -896,22 +1205,122 @@ _report_query() {
     fi
 
     local time_filter=""
-    [ -n "$since" ] && time_filter="AND timestamp >= datetime('now', '$since')"
+    local prev_time_filter=""
+    if [ -n "$since" ]; then
+        # 白名单验证：只允许安全的时间偏移格式
+        if [[ "$since" =~ ^-[0-9]+\ days?$ ]] || [[ "$since" =~ ^start\ of\ day$ ]]; then
+            time_filter="AND timestamp >= datetime('now', '$since')"
+            # 生成上一周期的过滤条件（用于环比）
+            local prev_since
+            if [[ "$since" =~ ^-([0-9]+)\ days?$ ]]; then
+                local days="${BASH_REMATCH[1]}"
+                prev_since="-${days} days"
+                prev_time_filter="AND timestamp >= datetime('now', '-$(( days * 2 )) days') AND timestamp < datetime('now', '${since}')"
+            elif [ "$since" = "start of day" ]; then
+                prev_time_filter="AND timestamp >= datetime('now', '-2 days') AND timestamp < datetime('now', 'start of day')"
+            fi
+        else
+            warn "无效的时间偏移: $since"
+            return 1
+        fi
+    fi
 
+    # ── 基础统计 ──
     REPORT_TOTAL=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE 1=1 ${time_filter};" 2>/dev/null || echo "0")
     REPORT_UNIQUE_IPS=$(sqlite3 "$db" "SELECT COUNT(DISTINCT src_ip) FROM attacks WHERE 1=1 ${time_filter};" 2>/dev/null || echo "0")
     REPORT_BLOCKED=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE blocked=1 ${time_filter};" 2>/dev/null || echo "0")
 
+    # ── 按类型分布 ──
     REPORT_BY_TYPE=$(sqlite3 -separator '|' "$db" \
         "SELECT attack_type, COUNT(*) as cnt FROM attacks WHERE 1=1 ${time_filter} GROUP BY attack_type ORDER BY cnt DESC LIMIT 8;" 2>/dev/null || true)
 
+    # ── 按端口分布 ──
     REPORT_BY_PORT=$(sqlite3 -separator '|' "$db" \
         "SELECT dst_port, COUNT(*) as cnt FROM attacks WHERE 1=1 ${time_filter} GROUP BY dst_port ORDER BY cnt DESC LIMIT 5;" 2>/dev/null || true)
 
+    # ── 最近攻击记录 ──
     REPORT_RECENT=$(sqlite3 -separator '|' "$db" \
         "SELECT datetime(timestamp,'localtime'), src_ip, attack_type, dst_port, CASE WHEN blocked=1 THEN '封禁' ELSE '监控' END FROM attacks WHERE 1=1 ${time_filter} ORDER BY timestamp DESC LIMIT 10;" 2>/dev/null || true)
 
+    # ── 按小时聚合（趋势图数据） ──
+    REPORT_HOURLY=$(sqlite3 -separator '|' "$db" \
+        "SELECT strftime('%H', timestamp) as hour, COUNT(*) as cnt FROM attacks WHERE 1=1 ${time_filter} GROUP BY hour ORDER BY hour;" 2>/dev/null || true)
+
+    # ── Top 攻击源 IP ──
+    REPORT_TOP_IPS=$(sqlite3 -separator '|' "$db" \
+        "SELECT src_ip, COUNT(*) as cnt FROM attacks WHERE 1=1 ${time_filter} GROUP BY src_ip ORDER BY cnt DESC LIMIT 8;" 2>/dev/null || true)
+
+    # ── 上一周期数据（环比） ──
+    REPORT_PREV_TOTAL="0"
+    REPORT_PREV_UNIQUE="0"
+    REPORT_PREV_BLOCKED="0"
+    if [ -n "$prev_time_filter" ]; then
+        REPORT_PREV_TOTAL=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE 1=1 ${prev_time_filter};" 2>/dev/null || echo "0")
+        REPORT_PREV_UNIQUE=$(sqlite3 "$db" "SELECT COUNT(DISTINCT src_ip) FROM attacks WHERE 1=1 ${prev_time_filter};" 2>/dev/null || echo "0")
+        REPORT_PREV_BLOCKED=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE blocked=1 ${prev_time_filter};" 2>/dev/null || echo "0")
+    fi
+
     return 0
+}
+
+# ASCII 柱状图渲染器
+# 参数：$1=数据（格式：label|value，每行一条）  $2=图表标题  $3=最大柱宽（默认 30）
+_report_bar_chart() {
+    local data="$1"
+    local title="$2"
+    local max_bar="${3:-30}"
+    local chart=""
+
+    if [ -z "$data" ]; then
+        return
+    fi
+
+    # 找到最大值用于缩放
+    local max_val=0
+    while IFS='|' read -r label value; do
+        [ -z "$label" ] && continue
+        [ "$value" -gt "$max_val" ] 2>/dev/null && max_val=$value
+    done <<< "$data"
+
+    if [ "$max_val" -eq 0 ]; then
+        return
+    fi
+
+    chart="\n${title}"
+    while IFS='|' read -r label value; do
+        [ -z "$label" ] && continue
+        local bar_len=$(( value * max_bar / max_val ))
+        [ "$bar_len" -lt 1 ] && [ "$value" -gt 0 ] && bar_len=1
+        local bar=""
+        for (( i=0; i<bar_len; i++ )); do bar+="█"; done
+        local pct=$(( value * 100 / max_val ))
+        chart+="\n  $(printf '%-6s' "$label") ${bar} ${value} (${pct}%)"
+    done <<< "$data"
+
+    echo "$chart"
+}
+
+_report_trend_icon() {
+    local current="$1" previous="$2"
+    if [ "$previous" -eq 0 ] 2>/dev/null; then
+        [ "$current" -gt 0 ] && echo "🆕" || echo "➖"
+        return
+    fi
+    if [ "$current" -gt "$previous" ]; then
+        local pct=$(( (current - previous) * 100 / previous ))
+        if [ "$pct" -gt 50 ]; then echo "🔴 ↑${pct}%"
+        elif [ "$pct" -gt 20 ]; then echo "🟡 ↑${pct}%"
+        else echo "🟢 ↑${pct}%"
+        fi
+    elif [ "$current" -lt "$previous" ]; then
+        local pct=$(( (previous - current) * 100 / previous ))
+        if [ "$pct" -gt 50 ]; then echo "🟢 ↓${pct}%"
+        elif [ "$pct" -gt 20 ]; then echo "🟡 ↓${pct}%"
+        else echo "🔴 ↓${pct}%"
+        fi
+    else
+        echo "➖ 持平"
+    fi
 }
 
 _report_format() {
@@ -927,10 +1336,19 @@ _report_format() {
     REPORT_BODY+="\n🖥️ 主机: ${hostname}"
     REPORT_BODY+="\n⏰ 生成: ${now}"
     REPORT_BODY+="\n"
-    REPORT_BODY+="\n▎ 总攻击: ${REPORT_TOTAL} 次"
-    REPORT_BODY+="\n▎ 来源IP: ${REPORT_UNIQUE_IPS} 个"
-    REPORT_BODY+="\n▎ 已封禁: ${REPORT_BLOCKED} 个"
 
+    # ── 核心指标 + 环比 ──
+    local trend_total trend_ip trend_blocked
+    trend_total=$(_report_trend_icon "$REPORT_TOTAL" "$REPORT_PREV_TOTAL")
+    trend_ip=$(_report_trend_icon "$REPORT_UNIQUE_IPS" "$REPORT_PREV_UNIQUE")
+    trend_blocked=$(_report_trend_icon "$REPORT_BLOCKED" "$REPORT_PREV_BLOCKED")
+
+    REPORT_BODY+="\n📈 核心指标:"
+    REPORT_BODY+="\n  ▎ 总攻击: ${REPORT_TOTAL} 次  ${trend_total}"
+    REPORT_BODY+="\n  ▎ 来源IP: ${REPORT_UNIQUE_IPS} 个  ${trend_ip}"
+    REPORT_BODY+="\n  ▎ 已封禁: ${REPORT_BLOCKED} 个  ${trend_blocked}"
+
+    # ── 攻击类型分布 ──
     if [ -n "$REPORT_BY_TYPE" ]; then
         REPORT_BODY+="\n\n🏷️ 攻击类型分布:"
         while IFS='|' read -r type cnt; do
@@ -938,6 +1356,7 @@ _report_format() {
         done <<< "$REPORT_BY_TYPE"
     fi
 
+    # ── 高危端口 ──
     if [ -n "$REPORT_BY_PORT" ]; then
         REPORT_BODY+="\n\n🚪 高危端口 TOP5:"
         while IFS='|' read -r port cnt; do
@@ -945,6 +1364,34 @@ _report_format() {
         done <<< "$REPORT_BY_PORT"
     fi
 
+    # ── 攻击时段分布（ASCII 柱状图） ──
+    if [ -n "$REPORT_HOURLY" ]; then
+        local hourly_chart
+        hourly_chart=$(_report_bar_chart "$REPORT_HOURLY" "🕐 攻击时段分布 (按小时):" 25)
+        if [ -n "$hourly_chart" ]; then
+            REPORT_BODY+="\n${hourly_chart}"
+        fi
+    fi
+
+    # ── Top 攻击源 IP ──
+    if [ -n "$REPORT_TOP_IPS" ]; then
+        REPORT_BODY+="\n\n🎯 攻击源 TOP8:"
+        local rank=0
+        while IFS='|' read -r ip cnt; do
+            [ -z "$ip" ] && continue
+            rank=$((rank + 1))
+            local bar=""
+            local max_cnt
+            max_cnt=$(echo "$REPORT_TOP_IPS" | head -1 | cut -d'|' -f2)
+            [ "${max_cnt:-0}" -eq 0 ] && max_cnt=1
+            local bar_len=$(( cnt * 20 / max_cnt ))
+            [ "$bar_len" -lt 1 ] && bar_len=1
+            for (( i=0; i<bar_len; i++ )); do bar+="■"; done
+            REPORT_BODY+="\n  ${rank}. $(printf '%-40s' "$ip") ${bar} ${cnt} 次"
+        done <<< "$REPORT_TOP_IPS"
+    fi
+
+    # ── 最近攻击记录 ──
     if [ -n "$REPORT_RECENT" ]; then
         REPORT_BODY+="\n\n📋 最近攻击记录:"
         while IFS='|' read -r ts ip type port status; do
@@ -973,12 +1420,12 @@ _report_send() {
             bot_token=$(echo "$tg_section" | grep 'bot_token:' | awk '{print $2}' | tr -d '"')
             chat_id=$(echo "$tg_section" | grep 'chat_id:' | awk '{print $2}' | tr -d '"')
             if [ -n "$bot_token" ] && [ -n "$chat_id" ]; then
-                echo -e "${CYAN}[Telegram]${NC} 发送报告..."
+                printf '%b\n' "${CYAN}[Telegram]${NC} 发送报告..."
                 local resp
                 resp=$(curl -s -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
                     -d chat_id="$chat_id" \
                     -d parse_mode="HTML" \
-                    --data-urlencode "text=$(echo -e "$REPORT_BODY")" \
+                    --data-urlencode "text=$(printf '%b\n' "$REPORT_BODY")" \
                     --connect-timeout 10 --max-time 15 2>&1)
                 echo "$resp" | grep -q '"ok":true' && info "Telegram 发送成功" || error "Telegram 发送失败: $resp"
                 sent=true
@@ -996,19 +1443,22 @@ _report_send() {
             webhook=$(echo "$dingtalk_section" | grep 'webhook:' | awk '{print $2}' | tr -d '"')
             secret=$(echo "$dingtalk_section" | grep 'secret:' | awk '{print $2}' | tr -d '"')
             if [ -n "$webhook" ]; then
-                echo -e "${CYAN}[钉钉]${NC} 发送报告..."
+                printf '%b\n' "${CYAN}[钉钉]${NC} 发送报告..."
                 local full_url="$webhook"
                 if [ -n "$secret" ]; then
                     local ts_ms sign_str sign
                     ts_ms=$(date +%s%3N)
                     sign_str="${ts_ms}\n${secret}"
-                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/-/g;s/\//_/g;s/=//g')
+                    sign=$(echo -ne "$sign_str" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
                     full_url="${webhook}&timestamp=${ts_ms}&sign=${sign}"
                 fi
+                # 将报告内容中的换行转义为 JSON 安全的 \n 序列
+                local report_json
+                report_json=$(printf '%b\n' "$REPORT_BODY" | head -20 | sed ':a;N;$!ba;s/\n/\\n/g')
                 local ding_resp
                 ding_resp=$(curl -s -X POST "$full_url" \
                     -H 'Content-Type: application/json' \
-                    -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"PortSentinel 安全报告\n$(echo -e "$REPORT_BODY" | head -20)\"}}" \
+                    -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"PortSentinel 安全报告\n${report_json}\"}}" \
                     --connect-timeout 10 --max-time 15 2>&1)
                 echo "$ding_resp" | grep -q '"errcode":0' && info "钉钉发送成功" || error "钉钉发送失败: $ding_resp"
                 sent=true
@@ -1029,14 +1479,14 @@ _report_send() {
             password=$(echo "$email_section" | grep 'password:' | awk '{print $2}' | tr -d '"')
             mail_to=$(echo "$email_section" | grep '^\s*to:' | awk '{print $2}' | tr -d '"')
             if [ -n "$smtp_host" ] && [ -n "$username" ] && [ -n "$password" ] && [ -n "$mail_to" ]; then
-                echo -e "${CYAN}[邮件]${NC} 发送报告..."
+                printf '%b\n' "${CYAN}[邮件]${NC} 发送报告..."
                 local curl_proto="smtp"
                 [ "$smtp_port" = "465" ] && curl_proto="smtps"
                 local mail_resp
                 mail_resp=$(printf "To: %s\nSubject: =?UTF-8?B?%s?=\nContent-Type: text/plain; charset=UTF-8\n\n%s" \
                     "$mail_to" \
                     "$(echo -n "PortSentinel 安全报告 - ${hostname}" | base64)" \
-                    "$(echo -e "$REPORT_BODY")" | \
+                    "$(printf '%b\n' "$REPORT_BODY")" | \
                     curl -s --url "${curl_proto}://${smtp_host}:${smtp_port}" \
                     --ssl-reqd --mail-from "$username" --mail-rcpt "$mail_to" \
                     --user "${username}:${password}" \
@@ -1061,20 +1511,20 @@ _report_send() {
 # 生成报告[查询 + 格式化]，不发送
 do_report_view() {
     local period="$1" label="$2"
-    echo -e "${CYAN}正在查询 ${label} 的攻击数据...${NC}"
+    printf '%b\n' "${CYAN}正在查询 ${label} 的攻击数据...${NC}"
     if ! _report_query "$period"; then
         return
     fi
     _report_format "$label"
     echo ""
-    echo -e "$REPORT_BODY"
+    printf '%b\n' "$REPORT_BODY"
     echo ""
 }
 
 # 生成报告并发送到指定通道
 do_report_send() {
     local period="$1" label="$2" channel="$3"
-    echo -e "${CYAN}正在生成 ${label} 报告...${NC}"
+    printf '%b\n' "${CYAN}正在生成 ${label} 报告...${NC}"
     if ! _report_query "$period"; then
         return
     fi
@@ -1111,11 +1561,14 @@ do_report_schedule() {
     esac
 
     local script_path="/usr/local/bin/port-monitor-report"
-    cat > "$script_path" << SCRIPTEOF
+    local safe_label="${label//[^a-zA-Z0-9_ -]/}"
+    cat > "$script_path" << 'SCRIPTEOF'
 #!/bin/bash
-# PortSentinel 定时报告 - ${label}
-"${0}" _internal-report "${period}" "${label}" "${channel}"
+# PortSentinel 定时报告
 SCRIPTEOF
+    # 安全地追加变量替换后的命令行
+    printf '"%s" _internal-report "%s" "%s" "%s"\n' \
+        "$0" "$period" "$safe_label" "$channel" >> "$script_path"
     chmod +x "$script_path"
 
     # 注册 cron 任务
@@ -1125,22 +1578,22 @@ SCRIPTEOF
     (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
 
     info "定时报告已配置"
-    echo -e "  ${CYAN}类型:${NC} ${label}"
-    echo -e "  ${CYAN}周期:${NC} ${cron_expr}"
-    echo -e "  ${CYAN}通道:${NC} ${channel}"
-    echo -e "  ${CYAN}日志:${NC} /var/log/port-monitor/report.log"
+    printf '%b\n' "  ${CYAN}类型:${NC} ${label}"
+    printf '%b\n' "  ${CYAN}周期:${NC} ${cron_expr}"
+    printf '%b\n' "  ${CYAN}通道:${NC} ${channel}"
+    printf '%b\n' "  ${CYAN}日志:${NC} /var/log/port-monitor/report.log"
 }
 
 do_report() {
     check_root
     print_banner
-    echo -e "${CYAN}${BOLD}📊 报告中心${NC}\n"
+    printf '%b\n' "${CYAN}${BOLD}📊 报告中心${NC}\n"
 
     local period_choice
     period_choice=$(ask_choice "选择时段" "当天" "近 3 天" "近 7 天" "近 30 天" "全部")
     local period="" label=""
     case $period_choice in
-        1) period="-0 days"; label="当天" ;;
+        1) period="start of day"; label="当天" ;;
         2) period="-3 days"; label="近 3 天" ;;
         3) period="-7 days"; label="近 7 天" ;;
         4) period="-30 days"; label="近 30 天" ;;
@@ -1184,16 +1637,41 @@ do_report() {
 }
 
 do_stats() {
-    echo -e "${CYAN}服务状态:${NC}"
+    printf '%b\n' "${CYAN}服务状态:${NC}"
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
-        echo -e "  状态: ${GREEN}运行中${NC}"
+        printf '%b\n' "  状态: ${GREEN}运行中${NC}"
         local pid
         pid=$(pgrep -x "port-monitor" || true)
         if [ -n "$pid" ]; then
             ps -p "$pid" -o pid,pcpu,pmem,etime --no-headers | awk '{printf "  PID: %s  CPU: %s%%  内存: %s%%  运行: %s\n",$1,$2,$3,$4}'
         fi
+        # 尝试从 API 获取详细统计
+        if [ -f "$CONFIG_FILE" ]; then
+            local api_port api_token
+            api_port=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'port:' | awk '{print $2}' | tr -d '"')
+            api_token=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'token:' | awk '{print $2}' | tr -d '"')
+            if [ -n "$api_port" ] && [ -n "$api_token" ]; then
+                local api_resp
+                api_resp=$(curl -s "http://127.0.0.1:${api_port}/api/status?token=${api_token}" --connect-timeout 3 --max-time 5 2>/dev/null)
+                if echo "$api_resp" | grep -q '"version"'; then
+                    local ver uptime_s packets ban_hits
+                    ver=$(echo "$api_resp" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+                    uptime_s=$(echo "$api_resp" | grep -o '"uptime_seconds":[0-9]*' | cut -d: -f2)
+                    packets=$(echo "$api_resp" | grep -o '"packets":[0-9]*' | cut -d: -f2)
+                    ban_hits=$(echo "$api_resp" | grep -o '"ban_hits":[0-9]*' | cut -d: -f2)
+                    local uptime_fmt
+                    if [ -n "$uptime_s" ]; then
+                        local h=$((uptime_s / 3600))
+                        local m=$(((uptime_s % 3600) / 60))
+                        uptime_fmt="${h}h ${m}m"
+                    fi
+                    printf '%b\n' "  版本: ${CYAN}${ver:-?}${NC}  运行: ${CYAN}${uptime_fmt:-?}${NC}"
+                    printf '%b\n' "  处理包数: ${CYAN}${packets:-0}${NC}  封禁拦截: ${CYAN}${ban_hits:-0}${NC}"
+                fi
+            fi
+        fi
     else
-        echo -e "  状态: ${RED}已停止${NC}"
+        printf '%b\n' "  状态: ${RED}已停止${NC}"
     fi
 }
 
@@ -1215,45 +1693,116 @@ do_ip_lookup() {
         ip=$(ask "输入要查询的 IP")
     fi
 
-    if ! echo "$ip" | grep -qE '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'; then
+    if ! _validate_ip "$ip"; then
         error "IP 格式不正确: $ip"
         return 0
     fi
 
-    echo -e "${CYAN}正在查询 ${ip} ...${NC}"
+    local box_w=62
+    printf '%b\n' "${CYAN}正在溯源 ${ip} ...${NC}"
+    echo ""
+
+    # ── 1. 反向 DNS ──
+    local rdns=""
+    rdns=$(host "$ip" 2>/dev/null | grep "domain name pointer" | awk '{print $NF}' | sed 's/\.$//' || true)
+    if [ -z "$rdns" ]; then
+        rdns=$(dig -x "$ip" +short 2>/dev/null | sed 's/\.$//' || true)
+    fi
+    [ -z "$rdns" ] && rdns="(无记录)"
+
+    # ── 2. GeoIP (ip-api.com) ──
     local resp
     resp=$(curl -s "http://ip-api.com/json/${ip}?lang=zh-CN&fields=status,country,regionName,city,isp,org,as,query" \
         --connect-timeout 10 --max-time 15 2>&1)
 
+    local country="" region="" city="" isp="" org="" asn=""
     if echo "$resp" | grep -q '"status":"success"'; then
-        local country region city isp org asn
         country=$(echo "$resp" | grep -o '"country":"[^"]*"' | cut -d'"' -f4)
         region=$(echo "$resp" | grep -o '"regionName":"[^"]*"' | cut -d'"' -f4)
         city=$(echo "$resp" | grep -o '"city":"[^"]*"' | cut -d'"' -f4)
         isp=$(echo "$resp" | grep -o '"isp":"[^"]*"' | cut -d'"' -f4)
         org=$(echo "$resp" | grep -o '"org":"[^"]*"' | cut -d'"' -f4)
         asn=$(echo "$resp" | grep -o '"as":"[^"]*"' | cut -d'"' -f4)
-
-        echo ""
-        echo -e "╔══════════════════════════════════════════════════╗"
-        echo -e "║  🔍 IP 溯源: ${CYAN}$(printf '%-35s' "$ip")${NC}  ║"
-        echo -e "╠══════════════════════════════════════════════════╣"
-        echo -e "║  国家/地区: $(printf '%-37s' "${country}")  ║"
-        echo -e "║  省份/州:   $(printf '%-37s' "${region}")  ║"
-        echo -e "║  城市:      $(printf '%-37s' "${city}")  ║"
-        echo -e "║  运营商:    $(printf '%-37s' "${isp}")  ║"
-        echo -e "║  组织:      $(printf '%-37s' "${org}")  ║"
-        echo -e "║  ASN:       $(printf '%-37s' "${asn}")  ║"
-        echo -e "╚══════════════════════════════════════════════════╝"
-        echo ""
-
-        # 如果在封禁列表中，额外提示
-        if iptables -L INPUT -n 2>/dev/null | grep -q "$ip"; then
-            warn "该 IP 当前处于封禁状态"
-        fi
-    else
-        error "查询失败: $resp"
     fi
+
+    # ── 3. WHOIS/RDAP 查询 ──
+    local whois_info=""
+    if command -v whois &>/dev/null; then
+        whois_info=$(whois "$ip" 2>/dev/null | grep -iE '^(netname|descr|abuse|org-name|OrgName|org-name):' | head -5 | sed 's/^\s*//' || true)
+    fi
+    if [ -z "$whois_info" ]; then
+        # 回退到 RDAP HTTP API
+        local rdap_resp
+        rdap_resp=$(curl -s "https://rdap.org/ip/${ip}" --connect-timeout 10 --max-time 15 2>&1)
+        if echo "$rdap_resp" | grep -q '"name"'; then
+            whois_info=$(echo "$rdap_resp" | grep -o '"name":"[^"]*"' | head -3 | cut -d'"' -f4 | tr '\n' ', ' || true)
+        fi
+    fi
+    [ -z "$whois_info" ] && whois_info="(无记录)"
+
+    # ── 4. 本地历史攻击记录 ──
+    local db="${DATA_DIR}/monitor.db"
+    local hist_total=0 hist_recent=0 hist_types="" hist_first="" hist_last=""
+    if [ -f "$db" ]; then
+        # 转义单引号防 SQL 注入（防御深度，已通过 _validate_ip 验证）
+        local safe_ip="${ip//\'/\'\'}"
+        hist_total=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE src_ip='$safe_ip';" 2>/dev/null || echo "0")
+        hist_recent=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE src_ip='$safe_ip' AND timestamp >= datetime('now','-24 hours');" 2>/dev/null || echo "0")
+        hist_types=$(sqlite3 -separator ', ' "$db" "SELECT DISTINCT attack_type FROM attacks WHERE src_ip='$safe_ip' LIMIT 5;" 2>/dev/null || true)
+        hist_first=$(sqlite3 "$db" "SELECT datetime(min(timestamp),'localtime') FROM attacks WHERE src_ip='$safe_ip';" 2>/dev/null || echo "无记录")
+        hist_last=$(sqlite3 "$db" "SELECT datetime(max(timestamp),'localtime') FROM attacks WHERE src_ip='$safe_ip';" 2>/dev/null || echo "无记录")
+    fi
+
+    # ── 5. 威胁等级评估 ──
+    local threat_level="低" threat_color="$GREEN"
+    if [ "$hist_total" -gt 100 ] 2>/dev/null; then
+        threat_level="极高" threat_color="$RED$BOLD"
+    elif [ "$hist_total" -gt 20 ] 2>/dev/null; then
+        threat_level="高" threat_color="$RED"
+    elif [ "$hist_total" -gt 5 ] 2>/dev/null; then
+        threat_level="中" threat_color="$YELLOW"
+    fi
+
+    # ── 6. 封禁状态 ──
+    local fw_backend
+    fw_backend=$(get_firewall_backend)
+    local is_banned=false
+    case "$fw_backend" in
+        iptables)
+            iptables -L INPUT -n 2>/dev/null | grep -q "$ip" && is_banned=true
+            ! $is_banned && ip6tables -L INPUT -n 2>/dev/null | grep -q "$ip" && is_banned=true
+            ;;
+        firewalld)  firewall-cmd --list-rich-rules 2>/dev/null | grep -q "$ip" && is_banned=true ;;
+        nftables)   nft list ruleset 2>/dev/null | grep -q "$ip" && is_banned=true ;;
+    esac
+
+    # ── 输出报告 ──
+    printf '%b\n' "╔$(printf '%0.s═' $(seq 1 $box_w))╗"
+    printf '%b\n' "║  🔍 IP 溯源报告: ${CYAN}$(printf '%-43s' "$ip")${NC}  ║"
+    printf '%b\n' "╠$(printf '%0.s═' $(seq 1 $box_w))╣"
+    printf '%b\n' "║  反向 DNS:  $(printf '%-49s' "${rdns}")  ║"
+    printf '%b\n' "║  国家/地区: $(printf '%-49s' "${country:-未知}")  ║"
+    printf '%b\n' "║  省份/州:   $(printf '%-49s' "${region:-未知}")  ║"
+    printf '%b\n' "║  城市:      $(printf '%-49s' "${city:-未知}")  ║"
+    printf '%b\n' "║  运营商:    $(printf '%-49s' "${isp:-未知}")  ║"
+    printf '%b\n' "║  组织:      $(printf '%-49s' "${org:-未知}")  ║"
+    printf '%b\n' "║  ASN:       $(printf '%-49s' "${asn:-未知}")  ║"
+    printf '%b\n' "╠$(printf '%0.s═' $(seq 1 $box_w))╣"
+    printf '%b\n' "║  WHOIS:     $(printf '%-49s' "${whois_info:0:49}")  ║"
+    printf '%b\n' "╠$(printf '%0.s═' $(seq 1 $box_w))╣"
+    printf '%b\n' "║  ${BOLD}本地攻击记录${NC}$(printf '%0.s ' $(seq 1 $((box_w - 14))))║"
+    printf '%b\n' "║  总攻击:    $(printf '%-49s' "${hist_total} 次")  ║"
+    printf '%b\n' "║  近24小时:  $(printf '%-49s' "${hist_recent} 次")  ║"
+    printf '%b\n' "║  攻击类型:  $(printf '%-49s' "${hist_types:-无}")  ║"
+    printf '%b\n' "║  首次记录:  $(printf '%-49s' "${hist_first}")  ║"
+    printf '%b\n' "║  最近记录:  $(printf '%-49s' "${hist_last}")  ║"
+    printf '%b\n' "╠$(printf '%0.s═' $(seq 1 $box_w))╣"
+    local ban_status="否"
+    $is_banned && ban_status="是"
+    printf '%b\n' "║  当前封禁:  $(printf '%-49s' "${ban_status}")  ║"
+    printf '%b\n' "║  威胁等级:  ${threat_color}$(printf '%-49s' "${threat_level}")${NC}  ║"
+    printf '%b\n' "╚$(printf '%0.s═' $(seq 1 $box_w))╝"
+    echo ""
 }
 
 # ── 实时攻击监控 ─────────────────────────────────────────────
@@ -1282,10 +1831,10 @@ do_live_monitor() {
         if [ "$current_ts" != "$last_ts" ]; then
             last_ts="$current_ts"
             clear
-            echo -e "${CYAN}${BOLD}📡 实时攻击监控${NC}  按 Ctrl+C 退出"
-            echo -e "  ─────────────────────────────────────────────────────────────────────"
-            echo -e "${YELLOW}  时间                来源IP             类型            端口   状态${NC}"
-            echo -e "  ─────────────────────────────────────────────────────────────────────"
+            printf '%b\n' "${CYAN}${BOLD}📡 实时攻击监控${NC}  按 Ctrl+C 退出"
+            printf '%b\n' "  ───────────────────────────────────────────────────────────────────────────────────"
+            printf '%b\n' "${YELLOW}  时间                来源IP                                   类型            端口    服务     状态${NC}"
+            printf '%b\n' "  ───────────────────────────────────────────────────────────────────────────────────"
 
             if [ -n "$rows" ]; then
                 echo "$rows" | while IFS='|' read -r ts ip type port status; do
@@ -1295,14 +1844,18 @@ do_live_monitor() {
                         brute_force) color="$RED" ;;
                         port_scan)   color="$YELLOW" ;;
                         ddos)        color="$RED$BOLD" ;;
+                        honeypot)    color="$RED$BOLD" ;;
                     esac
                     [ "$status" = "封禁" ] && status_color="$RED"
 
-                    printf "  %-19s ${CYAN}%-18s${NC} ${color}%-15s${NC} %-6s ${status_color}%s${NC}\n" \
-                        "$ts" "$ip" "$type" ":$port" "$status"
+                    local svc
+                    svc=$(_port_service "$port")
+
+                    printf "  %-19s ${CYAN}%-40s${NC} ${color}%-15s${NC} %-6s %-9s ${status_color}%s${NC}\n" \
+                        "$ts" "$ip" "$type" ":$port" "$svc" "$status"
                 done
             else
-                echo -e "  ${YELLOW}暂无攻击记录，等待中...${NC}"
+                printf '%b\n' "  ${YELLOW}暂无攻击记录，等待中...${NC}"
             fi
         fi
         sleep 2
@@ -1313,12 +1866,12 @@ do_live_monitor() {
 
 do_health_check() {
     print_banner
-    echo -e "${CYAN}${BOLD}🩺 系统健康检查${NC}\n"
+    printf '%b\n' "${CYAN}${BOLD}🩺 系统健康检查${NC}\n"
 
     local issues=0
 
     # 1. 服务进程
-    echo -e "  ${CYAN}[1/8]${NC} 服务进程..."
+    printf '%b\n' "  ${CYAN}[1/8]${NC} 服务进程..."
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         local pid
         pid=$(pgrep -x "port-monitor" || true)
@@ -1329,7 +1882,7 @@ do_health_check() {
     fi
 
     # 2. systemd 服务
-    echo -e "  ${CYAN}[2/8]${NC} systemd 服务..."
+    printf '%b\n' "  ${CYAN}[2/8]${NC} systemd 服务..."
     if systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
         info "已注册并启用"
     else
@@ -1338,7 +1891,7 @@ do_health_check() {
     fi
 
     # 3. 配置文件
-    echo -e "  ${CYAN}[3/8]${NC} 配置文件..."
+    printf '%b\n' "  ${CYAN}[3/8]${NC} 配置文件..."
     if [ -f "$CONFIG_FILE" ]; then
         local perm
         perm=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || echo "未知")
@@ -1354,7 +1907,7 @@ do_health_check() {
     fi
 
     # 4. SQLite 数据库
-    echo -e "  ${CYAN}[4/8]${NC} SQLite 数据库..."
+    printf '%b\n' "  ${CYAN}[4/8]${NC} SQLite 数据库..."
     local db="${DATA_DIR}/monitor.db"
     if [ -f "$db" ]; then
         local db_size
@@ -1372,7 +1925,7 @@ do_health_check() {
     fi
 
     # 5. 防火墙
-    echo -e "  ${CYAN}[5/8]${NC} 防火墙后端..."
+    printf '%b\n' "  ${CYAN}[5/8]${NC} 防火墙后端..."
     local backend
     backend=$(get_firewall_backend)
     case "$backend" in
@@ -1383,7 +1936,7 @@ do_health_check() {
     esac
 
     # 6. 告警通道
-    echo -e "  ${CYAN}[6/8]${NC} 告警通道..."
+    printf '%b\n' "  ${CYAN}[6/8]${NC} 告警通道..."
     local tg_en ding_en mail_en
     tg_en=$(sed -n '/^  telegram:/,/^  [a-z]/p' "$CONFIG_FILE" 2>/dev/null | grep -q 'enabled: true' && echo "y" || echo "n")
     ding_en=$(sed -n '/^  dingtalk:/,/^  [a-z]/p' "$CONFIG_FILE" 2>/dev/null | grep -q 'enabled: true' && echo "y" || echo "n")
@@ -1396,7 +1949,7 @@ do_health_check() {
     $alert_any || warn "未配置任何告警通道"
 
     # 7. 磁盘与日志
-    echo -e "  ${CYAN}[7/8]${NC} 磁盘与日志..."
+    printf '%b\n' "  ${CYAN}[7/8]${NC} 磁盘与日志..."
     local disk_usage
     disk_usage=$(df -h / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
     if [ -n "$disk_usage" ] && [ "$disk_usage" -gt 90 ]; then
@@ -1413,7 +1966,7 @@ do_health_check() {
     fi
 
     # 8. 服务资源占用
-    echo -e "  ${CYAN}[8/8]${NC} 服务资源占用..."
+    printf '%b\n' "  ${CYAN}[8/8]${NC} 服务资源占用..."
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         local pid
         pid=$(pgrep -x "port-monitor" || true)
@@ -1433,9 +1986,9 @@ do_health_check() {
     # 汇总
     echo ""
     if [ $issues -eq 0 ]; then
-        echo -e "  ${GREEN}${BOLD}═══ 检查完成：全部正常 ═══${NC}"
+        printf '%b\n' "  ${GREEN}${BOLD}═══ 检查完成：全部正常 ═══${NC}"
     else
-        echo -e "  ${YELLOW}${BOLD}═══ 检查完成：发现 ${issues} 个问题 ═══${NC}"
+        printf '%b\n' "  ${YELLOW}${BOLD}═══ 检查完成：发现 ${issues} 个问题 ═══${NC}"
     fi
 }
 
@@ -1444,7 +1997,7 @@ do_health_check() {
 do_cleanup() {
     check_root
     print_banner
-    echo -e "${CYAN}${BOLD}🧹 日志与数据清理${NC}\n"
+    printf '%b\n' "${CYAN}${BOLD}🧹 日志与数据清理${NC}\n"
 
     local days
     days=$(ask "保留最近多少天的数据" "30")
@@ -1455,30 +2008,30 @@ do_cleanup() {
     fi
 
     # 预览
-    echo -e "\n${CYAN}预览将清理的内容:${NC}"
+    printf '%b\n' "\n${CYAN}预览将清理的内容:${NC}"
 
     local db="${DATA_DIR}/monitor.db"
     local old_records=0
     if [ -f "$db" ]; then
         old_records=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE timestamp < datetime('now', '-${days} days');" 2>/dev/null || echo "0")
-        echo -e "  数据库: ${YELLOW}${old_records}${NC} 条超过 ${days} 天的攻击记录"
+        printf '%b\n' "  数据库: ${YELLOW}${old_records}${NC} 条超过 ${days} 天的攻击记录"
     fi
 
     local old_logs=""
     if [ -d "$LOG_DIR" ]; then
         old_logs=$(find "$LOG_DIR" -name "*.log" -mtime +"$days" 2>/dev/null || true)
         local log_count
-        log_count=$(echo "$old_logs" | grep -c '.' 2>/dev/null || echo "0")
+        log_count=$(echo "$old_logs" | grep -c '.' 2>/dev/null); log_count="${log_count:-0}"
         local log_size="0"
         [ -n "$old_logs" ] && log_size=$(echo "$old_logs" | xargs du -ch 2>/dev/null | tail -1 | awk '{print $1}')
-        echo -e "  日志文件: ${YELLOW}${log_count}${NC} 个旧日志 (${log_size:-0})"
+        printf '%b\n' "  日志文件: ${YELLOW}${log_count}${NC} 个旧日志 (${log_size:-0})"
     fi
 
     local old_backups=""
     old_backups=$(find /tmp -name "port-monitor.bak.*" -mtime +7 2>/dev/null || true)
     local bak_count
-    bak_count=$(echo "$old_backups" | grep -c '.' 2>/dev/null || echo "0")
-    echo -e "  临时备份: ${YELLOW}${bak_count}${NC} 个 /tmp 下的旧备份"
+    bak_count=$(echo "$old_backups" | grep -c '.' 2>/dev/null); bak_count="${bak_count:-0}"
+    printf '%b\n' "  临时备份: ${YELLOW}${bak_count}${NC} 个 /tmp 下的旧备份"
 
     if [ "$old_records" = "0" ] && [ -z "$old_logs" ] && [ "$bak_count" = "0" ]; then
         info "无需清理"
@@ -1499,17 +2052,151 @@ do_cleanup() {
     fi
 
     if [ -n "$old_logs" ]; then
-        echo "$old_logs" | xargs rm -f 2>/dev/null
+        while IFS= read -r f; do rm -f "$f" 2>/dev/null; done <<< "$old_logs"
         info "已清理旧日志文件"
     fi
 
     if [ -n "$old_backups" ]; then
-        echo "$old_backups" | xargs rm -f 2>/dev/null
+        while IFS= read -r f; do rm -f "$f" 2>/dev/null; done <<< "$old_backups"
         info "已清理旧临时备份"
     fi
 
     echo ""
     info "清理完成"
+}
+
+# ── Web 仪表盘 ──────────────────────────────────────────────
+
+do_dashboard() {
+    local api_port api_token api_enabled
+    if [ -f "$CONFIG_FILE" ]; then
+        api_enabled=$(grep -A2 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'enabled:' | awk '{print $2}' | tr -d '"')
+        api_port=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'port:' | awk '{print $2}' | tr -d '"')
+        api_token=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'token:' | awk '{print $2}' | tr -d '"')
+    fi
+    api_port="${api_port:-8900}"
+
+    if [ "$api_enabled" != "true" ]; then
+        warn "API 未启用，请在配置文件中设置 api.enabled: true"
+        return
+    fi
+
+    if ! systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+        error "服务未运行，请先启动"
+        return
+    fi
+
+    print_banner
+    printf '%b\n' "${CYAN}${BOLD}📊 Web 仪表盘${NC}\n"
+    printf '%b\n' "  访问地址: ${GREEN}http://localhost:${api_port}/${NC}"
+    printf '%b\n' "  API Token: ${YELLOW}${api_token:-无}${NC}"
+    echo ""
+    printf '%b\n' "  ${YELLOW}提示:${NC} 在浏览器中打开上述地址即可访问可视化仪表盘"
+    printf '%b\n' "  仪表盘包含: 实时攻击趋势、最近攻击列表、封禁管理、攻击源TOP10"
+}
+
+# ── 数据导出 ─────────────────────────────────────────────────
+
+do_export() {
+    check_root
+    print_banner
+    printf '%b\n' "${CYAN}${BOLD}📤 数据导出${NC}\n"
+
+    local period
+    period=$(ask_choice "导出时段" "近 7 天" "近 30 天" "近 90 天" "全部")
+    local days=7
+    case $period in
+        1) days=7 ;;
+        2) days=30 ;;
+        3) days=90 ;;
+        4) days=3650 ;;
+    esac
+
+    local format
+    format=$(ask_choice "导出格式" "CSV" "JSON")
+    local ext="csv"
+    [ "$format" = "2" ] && ext="json"
+
+    local outfile="port-sentinel-export-$(date +%Y%m%d%H%M%S).${ext}"
+    local db="${DATA_DIR}/monitor.db"
+
+    if [ ! -f "$db" ]; then
+        error "数据库不存在"
+        return
+    fi
+
+    if [ "$format" = "1" ]; then
+        sqlite3 -header -csv "$db" \
+            "SELECT datetime(timestamp,'localtime') as time, src_ip, attack_type, dst_port, blocked \
+             FROM attacks WHERE timestamp >= datetime('now', '-${days} days') \
+             ORDER BY timestamp DESC LIMIT 50000;" > "$outfile" 2>/dev/null
+    else
+        # sqlite3 -json 需要 3.33.0+，低版本回退到 CSV 格式
+        if sqlite3 -json ":memory:" "SELECT 1;" >/dev/null 2>&1; then
+            sqlite3 -json "$db" \
+                "SELECT datetime(timestamp,'localtime') as time, src_ip, attack_type, dst_port, blocked \
+                 FROM attacks WHERE timestamp >= datetime('now', '-${days} days') \
+                 ORDER BY timestamp DESC LIMIT 50000;" > "$outfile" 2>/dev/null
+        else
+            warn "sqlite3 版本不支持 JSON 导出，回退为 CSV 格式"
+            ext="csv"
+            outfile="${outfile%.json}.${ext}"
+            sqlite3 -header -csv "$db" \
+                "SELECT datetime(timestamp,'localtime') as time, src_ip, attack_type, dst_port, blocked \
+                 FROM attacks WHERE timestamp >= datetime('now', '-${days} days') \
+                 ORDER BY timestamp DESC LIMIT 50000;" > "$outfile" 2>/dev/null
+        fi
+    fi
+
+    if [ -f "$outfile" ] && [ -s "$outfile" ]; then
+        local size
+        size=$(du -h "$outfile" | awk '{print $1}')
+        info "导出完成: ${outfile} (${size})"
+    else
+        error "导出失败或无数据"
+    fi
+}
+
+# ── Prometheus 指标 ──────────────────────────────────────────
+
+do_prometheus() {
+    local api_port api_token api_enabled
+    if [ -f "$CONFIG_FILE" ]; then
+        api_enabled=$(grep -A2 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'enabled:' | awk '{print $2}' | tr -d '"')
+        api_port=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'port:' | awk '{print $2}' | tr -d '"')
+        api_token=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'token:' | awk '{print $2}' | tr -d '"')
+    fi
+    api_port="${api_port:-8900}"
+
+    if [ "$api_enabled" != "true" ]; then
+        warn "API 未启用，请在配置文件中设置 api.enabled: true"
+        return
+    fi
+
+    if ! systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+        error "服务未运行，请先启动"
+        return
+    fi
+
+    print_banner
+    printf '%b\n' "${CYAN}${BOLD}📈 Prometheus 指标${NC}\n"
+    printf '%b\n' "  指标端点: ${GREEN}http://localhost:${api_port}/api/metrics${NC}"
+    echo ""
+    printf '%b\n' "  ${YELLOW}可用指标:${NC}"
+    printf '%b\n' "    portsentinel_blocked_ips       当前封禁IP数量"
+    printf '%b\n' "    portsentinel_attacks_total     攻击总数(按类型)"
+    printf '%b\n' "    portsentinel_uptime_seconds    运行时长"
+    printf '%b\n' "    portsentinel_packets_total     处理包数"
+    printf '%b\n' "    portsentinel_ban_hits_total    封禁拦截次数"
+    echo ""
+    printf '%b\n' "  ${YELLOW}Grafana 配置:${NC}"
+    printf '%b\n' "    在 Prometheus 中添加 scrape_configs:"
+    printf '%b\n' "    - job_name: 'portsentinel'"
+    printf '%b\n' "      static_configs:"
+    printf '%b\n' "        - targets: ['localhost:${api_port}']"
+    printf '%b\n' "      metrics_path: '/api/metrics'"
+    [ -n "$api_token" ] && printf '%b\n' "      params:"
+    [ -n "$api_token" ] && printf '%b\n' "        token: ['${api_token}']"
 }
 
 show_menu() {
@@ -1519,10 +2206,10 @@ show_menu() {
     local hostname_str uptime_str cpu_str mem_str
     hostname_str=$(hostname 2>/dev/null | cut -c1-14 || echo "?")
     uptime_str=$(uptime -p 2>/dev/null | sed 's/up //' | cut -c1-10 || uptime 2>/dev/null | awk -F'up ' '{print $2}' | awk -F',' '{print $1}' | cut -c1-10 || echo "?")
-    cpu_str=$(awk '{u=$2+$4; t=$2+$4+$5; if(t>0) printf "%.0f%%", u*100/t}' /proc/stat 2>/dev/null || echo "?")
+    cpu_str=$(awk '/^cpu /{u=$2+$3; t=$2+$3+$4+$5+$6+$7+$8; if(t>0) printf "%.0f%%", (1-$5/t)*100}' /proc/stat 2>/dev/null || echo "?")
     mem_str=$(free 2>/dev/null | awk '/Mem:/{printf "%.0f%%", $3/$2*100}' || echo "?")
 
-    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    printf '%b\n' "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     printf "${BOLD}${CYAN}║${NC}  ${BOLD}PortSentinel${NC} v${PORTMONITOR_VERSION}  " && printf "${CYAN}│${NC}  主机: ${GREEN}%-16s${NC}" "$hostname_str" && printf "${CYAN}│${NC} 运行: ${GREEN}%-12s${NC} ${CYAN}║${NC}\n" "$uptime_str"
     printf "${BOLD}${CYAN}║${NC}  " && printf "CPU: ${YELLOW}%-5s${NC} " "$cpu_str" && printf "${CYAN}│${NC} 内存: ${YELLOW}%-5s${NC} " "$mem_str"
 
@@ -1534,31 +2221,37 @@ show_menu() {
     fi
     printf "     ${CYAN}║${NC}\n"
 
-    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    printf '%b\n' "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
     if systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
         # ── 服务控制 ──
-        echo -e "  ${BOLD}${GREEN}服务控制${NC}"
-        echo -e "  ${YELLOW}[ 1]${NC} 启动服务       ${YELLOW}[ 2]${NC} 停止服务       ${YELLOW}[ 3]${NC} 重启服务"
+        printf '%b\n' "  ${BOLD}${GREEN}服务控制${NC}"
+        printf '%b\n' "  ${YELLOW}[ 1]${NC} 启动服务       ${YELLOW}[ 2]${NC} 停止服务       ${YELLOW}[ 3]${NC} 重启服务"
+        printf '%b\n' "  ${YELLOW}[ 4]${NC} 热加载配置"
         echo ""
         # ── 监控查询 ──
-        echo -e "  ${BOLD}${CYAN}监控查询${NC}"
-        echo -e "  ${YELLOW}[ 4]${NC} 查看状态       ${YELLOW}[ 5]${NC} 查看统计       ${YELLOW}[ 6]${NC} 查看封禁IP"
-        echo -e "  ${YELLOW}[ 7]${NC} 查看日志       ${YELLOW}[ 8]${NC} 实时监控       ${YELLOW}[ 9]${NC} IP溯源查询"
+        printf '%b\n' "  ${BOLD}${CYAN}监控查询${NC}"
+        printf '%b\n' "  ${YELLOW}[ 5]${NC} 查看状态       ${YELLOW}[ 6]${NC} 查看统计       ${YELLOW}[ 7]${NC} 查看封禁IP"
+        printf '%b\n' "  ${YELLOW}[ 8]${NC} 查看日志       ${YELLOW}[ 9]${NC} 实时监控       ${YELLOW}[10]${NC} IP溯源查询"
         echo ""
         # ── 告警报告 ──
-        echo -e "  ${BOLD}${YELLOW}告警报告${NC}"
-        echo -e "  ${YELLOW}[10]${NC} 测试告警       ${YELLOW}[11]${NC} 报告中心       ${YELLOW}[12]${NC} 健康检查"
+        printf '%b\n' "  ${BOLD}${YELLOW}告警报告${NC}"
+        printf '%b\n' "  ${YELLOW}[11]${NC} 测试告警       ${YELLOW}[12]${NC} 报告中心       ${YELLOW}[13]${NC} 健康检查"
+        echo ""
+        # ── 数据导出 ──
+        printf '%b\n' "  ${BOLD}${MAGENTA}数据与面板${NC}"
+        printf '%b\n' "  ${YELLOW}[14]${NC} Web仪表盘      ${YELLOW}[15]${NC} 导出数据       ${YELLOW}[16]${NC} Prometheus指标"
         echo ""
         # ── 系统维护 ──
-        echo -e "  ${BOLD}${RED}系统维护${NC}"
-        echo -e "  ${YELLOW}[13]${NC} 手动解封       ${YELLOW}[14]${NC} 编辑配置       ${YELLOW}[15]${NC} 更新程序"
-        echo -e "  ${YELLOW}[16]${NC} 备份配置       ${YELLOW}[17]${NC} 日志清理       ${YELLOW}[ 0]${NC} 退出"
+        printf '%b\n' "  ${BOLD}${RED}系统维护${NC}"
+        printf '%b\n' "  ${YELLOW}[17]${NC} 手动解封       ${YELLOW}[18]${NC} 白名单管理     ${YELLOW}[19]${NC} 编辑配置"
+        printf '%b\n' "  ${YELLOW}[20]${NC} 更新程序       ${YELLOW}[21]${NC} 备份配置       ${YELLOW}[22]${NC} 日志清理"
+        printf '%b\n' "  ${YELLOW}[ 0]${NC} 退出"
         echo ""
     else
-        echo -e "  ${BOLD}${GREEN}安装${NC}"
-        echo -e "  ${YELLOW}[1]${NC} 安装程序       ${YELLOW}[0]${NC} 退出"
+        printf '%b\n' "  ${BOLD}${GREEN}安装${NC}"
+        printf '%b\n' "  ${YELLOW}[1]${NC} 安装程序       ${YELLOW}[0]${NC} 退出"
         echo ""
     fi
 }
@@ -1568,43 +2261,48 @@ show_menu_loop() {
         show_menu
 
         if systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
-            echo -n -e "${GREEN}请选择 [0-17]: ${NC}"
+            printf '%b' "${GREEN}请选择 [0-22]: ${NC}"
             read -r choice
             echo ""
             case $choice in
                 1)  do_start ;;
                 2)  do_stop ;;
                 3)  do_restart ;;
-                4)  do_status ;;
-                5)  do_stats ;;
-                6)  do_view_bans ;;
-                7)  do_logs ;;
-                8)  do_live_monitor ;;
-                9)  do_ip_lookup ;;
-                10) do_test_alert ;;
-                11) do_report ;;
-                12) do_health_check ;;
-                13) do_unban ;;
-                14) do_edit_config ;;
-                15) do_update ;;
-                16) do_backup ;;
-                17) do_cleanup ;;
-                0)  echo -e "${GREEN}退出${NC}"; exit 0 ;;
+                4)  do_reload ;;
+                5)  do_status ;;
+                6)  do_stats ;;
+                7)  do_view_bans ;;
+                8)  do_logs ;;
+                9)  do_live_monitor ;;
+                10) do_ip_lookup ;;
+                11) do_test_alert ;;
+                12) do_report ;;
+                13) do_health_check ;;
+                14) do_dashboard ;;
+                15) do_export ;;
+                16) do_prometheus ;;
+                17) do_unban ;;
+                18) do_manage_whitelist ;;
+                19) do_edit_config ;;
+                20) do_update ;;
+                21) do_backup ;;
+                22) do_cleanup ;;
+                0)  printf '%b\n' "${GREEN}退出${NC}"; exit 0 ;;
                 *)  error "无效选择" ;;
             esac
         else
-            echo -n -e "${GREEN}请选择 [0-1]: ${NC}"
+            printf '%b' "${GREEN}请选择 [0-1]: ${NC}"
             read -r choice
             echo ""
             case $choice in
                 1)  do_install ;;
-                0)  echo -e "${GREEN}退出${NC}"; exit 0 ;;
+                0)  printf '%b\n' "${GREEN}退出${NC}"; exit 0 ;;
                 *)  error "无效选择" ;;
             esac
         fi
 
         echo ""
-        echo -n -e "${YELLOW}按 Enter 继续...${NC}"
+        printf '%b' "${YELLOW}按 Enter 继续...${NC}"
         read -r
     done
 }
@@ -1617,15 +2315,22 @@ main() {
         start)      do_start; exit 0 ;;
         stop)       do_stop; exit 0 ;;
         restart)    do_restart; exit 0 ;;
+        reload)     do_reload; exit 0 ;;
         status)     do_status; exit 0 ;;
         logs)       do_logs; exit 0 ;;
         test-alert) do_test_alert; exit 0 ;;
         report)     do_report; exit 0 ;;
         _internal-report) _report_query "$2"; _report_format "$3"; _report_send "$4"; exit 0 ;;
         lookup)     do_ip_lookup "$2"; exit 0 ;;
+        whitelist)  do_manage_whitelist; exit 0 ;;
         live)       do_live_monitor; exit 0 ;;
         health)     do_health_check; exit 0 ;;
         health-check) do_health_check; exit 0 ;;
+        dashboard)  do_dashboard; exit 0 ;;
+        export)     do_export; exit 0 ;;
+        metrics)    do_prometheus; exit 0 ;;
+        backup)     do_backup; exit 0 ;;
+        full-uninstall) do_full_uninstall; exit 0 ;;
         cleanup)    do_cleanup; exit 0 ;;
         --version|-v) echo "PortSentinel v${PORTMONITOR_VERSION}"; exit 0 ;;
         *)          show_menu_loop ;;
