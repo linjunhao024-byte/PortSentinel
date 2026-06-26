@@ -48,6 +48,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
 NC='\033[0m'
 BOLD='\033[1m'
 
@@ -80,21 +81,27 @@ _install_rollback() {
 
 print_banner() {
     clear
-    printf '%b\n' "${CYAN}${BOLD}"
-    printf '%s\n' "                    ██▓     █    ██  ███▄    █                       "
-    printf '%s\n' "                   ▓██▒     ██  ▓██▒ ██ ▀█   █                      "
-    printf '%s\n' "                   ██░    ▓██  ▒██▒▓██  ▀█ ██▒                      "
-    printf '%b\n' "                   ${YELLOW}▓██░    ▓▓█  ░██░▓██▒  ▐▌██▒${CYAN}                      "
-    printf '%b\n' "                   ${YELLOW}▒█████▒▒▒█████▓ ▒██░   ▓██░${CYAN}                      "
-    printf '%b\n' "                   ${NC}${BOLD}  · · · P O R T S E N T I N E L · · ·${CYAN}${BOLD}        "
-    printf '%s\n' ""
-    printf '%b\n' "       ${GREEN}${BOLD}Your Ports, Our Watch.${CYAN}${BOLD}                                      "
-    printf '%b\n' "       ${NC}检测端口扫描 | 防御暴力破解 | 自动封禁攻击IP${CYAN}${BOLD}              "
-    printf '%b\n' "       ${NC}github.com/linjunhao024-byte/PortSentinel${CYAN}${BOLD}                  "
-    printf '%s\n' ""
-    printf '%b\n' "${NC}"
-}
+    local W=60
+    local sep
+    sep=$(printf '%*s' "$W" '' | tr ' ' '=')
+    local title="LIN - PORTSENTINEL"
+    local tagline="Your Ports, Our Watch."
+    local t_pad=$(( (W - ${#title}) / 2 ))
+    local g_pad=$(( (W - ${#tagline}) / 2 ))
+    local blank
+    blank=$(printf '%*s' "$W" '')
 
+    printf '\n'
+    printf '%b\n' "${CYAN}${BOLD}  +${sep}+${NC}"
+    printf '%b\n' "${CYAN}${BOLD}  |${blank}|${NC}"
+    printf '%b\n' "${CYAN}${BOLD}  |$(printf '%*s' $t_pad '')${WHITE}${BOLD}${title}${NC}${CYAN}${BOLD}$(printf '%*s' $((W - t_pad - ${#title})) '')|${NC}"
+    printf '%b\n' "${CYAN}${BOLD}  |${blank}|${NC}"
+    printf '%b\n' "${CYAN}${BOLD}  |${sep}|${NC}"
+    printf '%b\n' "${CYAN}  |$(printf '%*s' $g_pad '')${GREEN}${BOLD}${tagline}${NC}${CYAN}$(printf '%*s' $((W - g_pad - ${#tagline})) '')|${NC}"
+    printf '%b\n' "${CYAN}  |${blank}|${NC}"
+    printf '%b\n' "${CYAN}  +${sep}+${NC}"
+    printf '\n'
+}
 print_step() {
     printf '%b\n' "\n${CYAN}━━━ $1 ━━━${NC}\n"
 }
