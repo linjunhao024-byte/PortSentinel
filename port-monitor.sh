@@ -86,14 +86,14 @@ print_banner() {
     sep=$(printf '%*s' "$W" '' | tr ' ' '=')
     blank=$(printf '%*s' "$W" '')
 
-    # LIN ASCII art - 7 lines, each exactly 32 chars
-    local a1="####        #####       ###   ##"
-    local a2="####          ##       # #   ## "
-    local a3="####          ##       #  #  ## "
-    local a4="####          ##       #   # ## "
-    local a5="####          ##       #    ### "
-    local a6="####          ##       #     ## "
-    local a7="########    #####       #     ##"
+    # LIN big block letters - 7 lines, each 34 chars
+    local a1="####           ##          ##   ##"
+    local a2="####           ##          ###  ##"
+    local a3="####           ##          #### ##"
+    local a4="####           ##          ## ####"
+    local a5="####           ##          ##  ###"
+    local a6="####           ##          ##   ##"
+    local a7="########       ##          ##   ##"
 
     local title="P O R T S E N T I N E L"
     local tagline="Your Ports, Our Watch."
