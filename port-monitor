@@ -295,7 +295,8 @@ def _handle_strip_comments(s):
 
 
 def load_config(path):
-    with open(path, "r", encoding="utf-8") as f:
+    # utf-8-sig：容忍 Windows 编辑器写入的 BOM，否则首个键名会带不可见字符
+    with open(path, "r", encoding="utf-8-sig") as f:
         text = f.read()
     return _yaml_parse(text)
 
