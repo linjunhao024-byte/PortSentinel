@@ -401,29 +401,33 @@ docker run -d \
   -v portsentinel-logs:/var/log/port-monitor \
   portsentinel
 
-# 或使用 docker-compose
-docker-compose up -d
+# 容器（仓库已自带 config/config.yaml，直接起即可）
+docker compose up -d
+# 如需开启 API：先改 config/config.yaml 里的 api.enabled: true 并填入随机 token
 ```
 
 ### CLI 命令
 
 ```bash
-sudo port-monitor.sh              # 进入管理面板
-sudo port-monitor.sh start        # 启动服务
-sudo port-monitor.sh stop         # 停止服务
-sudo port-monitor.sh restart      # 重启服务
-sudo port-monitor.sh reload       # 热加载配置
-sudo port-monitor.sh status       # 查看状态
-sudo port-monitor.sh update       # 更新程序
-sudo port-monitor.sh test-alert   # 测试告警通道
-sudo port-monitor.sh report       # 报告中心
-sudo port-monitor.sh health       # 健康检查
-sudo port-monitor.sh lookup 1.2.3.4  # IP 溯源
-sudo port-monitor.sh live         # 实时监控
-sudo port-monitor.sh whitelist    # 白名单管理
-sudo port-monitor.sh cleanup      # 日志清理
-sudo port-monitor.sh uninstall    # 卸载
-sudo port-monitor.sh --version    # 查看版本
+# 安装脚本会把管理脚本复制为 /usr/local/bin/port-monitor-ctl，
+# 并创建快捷命令 pm（安装时自定义则用自定义名）。
+# port-monitor.sh 只是下载下来的安装文件，不会留在 PATH 里。
+sudo pm                    # 进入管理面板
+sudo pm start              # 启动服务
+sudo pm stop               # 停止服务
+sudo pm restart            # 重启服务
+sudo pm reload             # 热加载配置
+sudo pm status             # 查看状态
+sudo pm update             # 更新程序
+sudo pm test-alert         # 测试告警通道
+sudo pm report             # 报告中心
+sudo pm health            # 健康检查
+sudo pm lookup 1.2.3.4     # IP 溯源
+sudo pm live               # 实时监控
+sudo pm whitelist          # 白名单管理
+sudo pm cleanup            # 数据清理
+sudo pm uninstall          # 卸载
+sudo pm --version          # 查看版本
 ```
 
 ---
@@ -654,7 +658,7 @@ alert:
 安装完成后可随时验证告警通道是否正常：
 
 ```bash
-sudo port-monitor.sh test-alert
+sudo pm test-alert
 ```
 
 ---
@@ -663,7 +667,7 @@ sudo port-monitor.sh test-alert
 
 | 组件 | 语言 | 说明 |
 |------|------|------|
-| 检测引擎 | Python 3 | AF_PACKET 抓包、IPv4/IPv6 双栈、IP 分片过滤、滑动窗口检测、指针交换并发优化 |
+| 检测引擎 | Python 3 | AF_PACKET 抓包、IPv4/IPv6 双栈、IP 分片过滤、滚动时间窗口检测、锁内裁剪+锁外分析 |
 | 告警推送 | Python 3 | 异步队列 + 聚合防抖、模板系统、Telegram / 钉钉 / SMTP 三通道 |
 | 持久化 | SQLite | WAL 模式、批量写入、内存缓存封禁状态、自动迁移 |
 | 防火墙 | iptables / firewalld / nftables | 内核级封禁/解封、三种封禁模式、过期自动解封、重启恢复 |
@@ -679,6 +683,23 @@ sudo port-monitor.sh test-alert
 ---
 
 ## 📋 版本历史 | Changelog
+
+### v1.0.3 (2026-11-11)
+
+**缺陷修复（生产可用性）：**
+- 重写内置 YAML 解析器：块状列表此前会被解析成单个 dict，导致敏感端口/白名单/蜜罐端口/响应动作全部失效；现支持列表、列表内映射、行内 `[]`/`{}`、引号与注释
+- 修复检测窗口被截断：分析周期不再清空 per-IP 数据，改为按最大窗口滚动裁剪，`window: 60s` 的暴破检测真正生效
+- 防火墙解封改为带核验：同时清除 DROP/REJECT/hashlimit 规则，残留则返回失败并保留数据库记录（不再出现"面板显示已解封、实际永久封禁"）
+- nftables 自动创建私有表与 input 链（此前依赖不存在的 `inet filter input`，封禁必然失败）
+- 自动解封失败时保留记录并重试；API 解封接口同失败返回 500
+- 数据库写入改为 UPSERT（续封保留首次封禁时间）；API 读操作纳入连接锁
+- API 空 token 一律拒绝，示例默认 token 也拒绝启动；导出接口参数异常不再 500 崩溃
+- 安装脚本按实际探测结果写 `ban.method`（不再硬编码 iptables）；服务 PID 取 systemd MainPID（`pgrep -x port-monitor` 永远取不到）
+- `pm unban` 交给引擎处理，同时清理防火墙与数据库，重启后不再被回封
+- Autopilot：`integrity_check` 结果真正被判定；抓包异常触发 socket 重建；更新落地前做语法校验
+- `auto_update_apply` 默认改为 `false`（更新无签名校验，开启等于允许远程替换 root 服务）
+- 容器部署补全 `config/config.yaml`，健康检查改为进程存活检测，镜像只装运行期依赖
+- README CLI 命令与实际安装的 `pm` / `port-monitor-ctl` 对齐
 
 ### v1.0.2 (2026-06-27)
 

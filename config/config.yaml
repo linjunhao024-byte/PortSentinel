@@ -1,0 +1,150 @@
+# LIN-PortSentinel 容器运行配置
+# docker-compose 会把本目录只读挂载到 /etc/port-monitor，
+# 修改后执行 docker compose restart 生效。
+# 完整字段参考：config.example.yaml
+
+monitor:
+  interval: 5s
+
+rules:
+  port_scan:
+    window: 10s
+    thresholds:
+      low: 10
+      medium: 20
+      high: 100
+      critical: 1000
+    auto_ban: true
+    ban_duration: 1h
+
+  brute_force:
+    window: 60s
+    auto_ban: true
+    ban_duration: 24h
+    permanent: false
+    sensitive_ports:
+      - port: 22
+        name: "SSH"
+        threshold: 5
+      - port: 3306
+        name: "MySQL"
+        threshold: 10
+      - port: 6379
+        name: "Redis"
+        threshold: 3
+
+  ddos:
+    window: 5s
+    threshold: 1000
+    auto_ban: true
+    ban_duration: 1h
+
+  adaptive:
+    enabled: false
+    learning_period: 30m
+    multiplier: 3.0
+    anomaly_factor: 10.0
+    recalibrate_interval: 1h
+
+honeypot:
+  enabled: false
+  ports:
+    - 2222
+    - 8888
+    - 33899
+  ban_duration: 7d
+  permanent: false
+  services:
+    "2222": "ssh"
+    "8888": "http"
+    "33899": "redis"
+
+threat_intel:
+  enabled: false
+  abuseipdb_key: ""
+  sync_interval: 6h
+
+correlation:
+  enabled: false
+  window: 10m
+
+response:
+  enabled: false
+  actions:
+    - type: webhook
+      url: "https://internal.example.com/api/security-event"
+      method: POST
+      body: '{"ip":"{{src_ip}}","type":"{{attack_type}}","port":{{dst_port}},"time":"{{time}}"}'
+
+api:
+  # 容器内默认关闭。开启前必须先在下面填一个随机 token（例如
+  # python3 -c "import secrets;print(secrets.token_urlsafe(32)"），
+  # 否则引擎会拒绝启动 API。对公网暴露请走反向代理 + HTTPS。
+  enabled: false
+  host: "127.0.0.1"
+  port: 8900
+  token: ""
+
+federation:
+  enabled: false
+  sync_interval: 60s
+  node_id: ""
+  cluster_secret: ""
+  peers: []
+
+alert:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+  dingtalk:
+    enabled: false
+    webhook: ""
+    secret: ""
+  email:
+    enabled: false
+    smtp_host: ""
+    smtp_port: 465
+    username: ""
+    password: ""
+    to: ""
+  wechat:
+    enabled: false
+    webhook: ""
+  feishu:
+    enabled: false
+    webhook: ""
+    secret: ""
+  slack:
+    enabled: false
+    webhook: ""
+  log:
+    enabled: true
+    path: "/var/log/port-monitor/port-monitor.log"
+
+storage:
+  sqlite:
+    path: "/var/lib/port-monitor/monitor.db"
+
+ban:
+  method: "iptables"
+  mode: "drop"
+  whitelist:
+    - "127.0.0.1"
+    - "::1"
+
+autopilot:
+  enabled: false
+  health_check_interval: 5m
+  max_restart_attempts: 3
+  restart_cooldown: 60s
+  auto_cleanup: true
+  cleanup_interval: 24h
+  cleanup_keep_days: 30
+  auto_backup: true
+  backup_interval: 24h
+  backup_keep_count: 7
+  backup_dir: "/var/lib/port-monitor/backups"
+  auto_update: true
+  update_check_interval: 12h
+  auto_update_apply: false

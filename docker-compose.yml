@@ -1,12 +1,12 @@
 # LIN-PortSentinel Docker Compose
-version: "3.8"
-
 services:
   port-sentinel:
     build: .
     image: portsentinel:latest
     container_name: port-sentinel
     restart: unless-stopped
+    # 让 PID 1 由 tini 代理，正确处理 SIGTERM/SIGHUP
+    init: true
 
     # 网络权限：抓包 + iptables 规则
     cap_add:
@@ -15,7 +15,7 @@ services:
     network_mode: host  # 必须使用 host 网络才能抓取真实流量
 
     volumes:
-      # 配置文件（必须挂载）
+      # 正在使用的配置（仓库已自带 config/config.yaml；改完 restart 生效）
       - ./config:/etc/port-monitor:ro
       # 数据持久化
       - port-sentinel-data:/var/lib/port-monitor
@@ -25,9 +25,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
 
-    # 健康检查
+    # 健康检查：API 默认关闭且需要 token，所以检查进程本身是否存活
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/api/health')"]
+      test: ["CMD", "python3", "-c", "import os,sys;sys.exit(0 if any(p.isdigit() and b'port-monitor' in open('/proc/'+p+'/cmdline','rb').read() for p in os.listdir('/proc')) else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3

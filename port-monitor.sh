@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# LIN-PortSentinel - 一体化管理脚本 v1.0.2
+# LIN-PortSentinel - 一体化管理脚本 v1.0.3
 # Author: LIN | Your Ports, Our Watch.
 
-PORTMONITOR_VERSION="1.0.2"
+PORTMONITOR_VERSION="1.0.3"
 
 # ── 启动依赖检测 ─────────────────────────────────────────────
 
@@ -262,7 +262,12 @@ _port_service() {
 get_firewall_backend() {
     local backend=""
     if [ -f "$CONFIG_FILE" ]; then
-        backend=$(grep -A1 '^ban:' "$CONFIG_FILE" 2>/dev/null | grep 'method:' | awk '{print $2}' | tr -d '"' || true)
+        # 只在 ban 段内取 method，避免抓到其他段里的同名字段
+        backend=$(awk '
+            /^ban:/ {inban=1; next}
+            inban && /^[^[:space:]]/ {inban=0}
+            inban && /^[[:space:]]+method:/ {gsub(/.*method:[[:space:]]*/,""); gsub(/["#].*/,""); gsub(/[[:space:]]/,""); print; exit}
+        ' "$CONFIG_FILE" 2>/dev/null || true)
     fi
     if [ -z "$backend" ] || [ "$backend" = "none" ]; then
         if command -v nft &>/dev/null && nft list ruleset &>/dev/null 2>&1; then
@@ -279,9 +284,20 @@ get_firewall_backend() {
     fi
 }
 
+# 取 systemd 服务的真实主进程 PID
+# 注意：进程名是 python3，pgrep -x "port-monitor" 永远匹配不到
+_service_pid() {
+    local pid
+    pid=$(systemctl show -p MainPID --value "$SERVICE_NAME" 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -z "$pid" ] || [ "$pid" = "0" ]; then
+        pid=$(pgrep -f "/usr/local/bin/port-monitor" 2>/dev/null | head -1 || true)
+    fi
+    echo "$pid"
+}
+
 do_install() {
     print_banner
-    printf '%b\n' "${CYAN}${BOLD}安装向导${NC} - 4 步完成部署\n"
+    printf '%b\n' "${CYAN}${BOLD}安装向导${NC} - 5 步完成部署\n"
 
     check_root
 
@@ -297,7 +313,7 @@ do_install() {
     SHORTCUT="pm"
 
     # ── 步骤 1: 服务器环境 ──
-    print_step "步骤 1/4: 服务器环境"
+    print_step "步骤 1/5: 服务器环境"
     printf '%b\n' "  ${YELLOW}[1]${NC} 云服务器 - 自动忽略内网流量，避免误报"
     printf '%b\n' "  ${YELLOW}[2]${NC} 独立服务器/VPS - 监控全部流量"
     echo ""
@@ -308,7 +324,14 @@ do_install() {
         2) MONITOR_MODE="standalone"; IGNORE_INTERNAL="n" ;;
     esac
 
-    BAN_METHOD="iptables"
+    # 按系统实际情况探测防火墙：硬编码 iptables 在 Alpine/nft-only 系统上封禁会全部失效
+    BAN_METHOD=$(get_firewall_backend)
+    if [ "$BAN_METHOD" = "未知" ]; then
+        warn "未检测到 iptables/firewalld/nftables，封禁功能可能不可用"
+        BAN_METHOD="iptables"
+    else
+        info "防火墙后端: ${BAN_METHOD}"
+    fi
     ENABLE_AUTO_BAN="y"
     SCAN_BAN_DURATION="1h"
     BRUTE_BAN_DURATION="24h"
@@ -319,7 +342,7 @@ do_install() {
     info "服务器环境: ${MONITOR_MODE}"
 
     # ── 步骤 2: 告警通道 ──
-    print_step "步骤 2/4: 告警通道"
+    print_step "步骤 2/5: 告警通道"
     ENABLE_TELEGRAM="n"
     ENABLE_DINGTALK="n"
     ENABLE_EMAIL="n"
@@ -436,7 +459,7 @@ do_install() {
     fi
 
     # ── 步骤 3: 检测规则 ──
-    print_step "步骤 3/4: 检测规则"
+    print_step "步骤 3/5: 检测规则"
     printf '%b\n' "  ${YELLOW}[1]${NC} 严格 - 10端口/10秒, 3次SSH/分钟"
     printf '%b\n' "  ${YELLOW}[2]${NC} 正常 - 20端口/10秒, 5次SSH/分钟 [推荐]"
     printf '%b\n' "  ${YELLOW}[3]${NC} 宽松 - 50端口/10秒, 10次SSH/分钟"
@@ -533,8 +556,6 @@ generate_config() {
 
 monitor:
   interval: 5s
-  ports: "1-65535"
-  protocol: "tcp"
 
 rules:
   port_scan:
@@ -593,7 +614,7 @@ api:
   enabled: false
   host: "127.0.0.1"       # 监听地址（生产环境建议 127.0.0.1）
   port: 8900              # 监听端口
-  token: ""               # API Token（空=无认证，生产环境务必设置）
+  token: ""               # API Token（空 token 会被引擎拒绝，开启 API 前必须填随机串）
 
 # 分布式联动（可选）：多节点共享封禁列表
 # 需要对端节点启用 API 服务
@@ -602,7 +623,7 @@ federation:
   sync_interval: 60s       # 同步间隔
   node_id: ""              # 节点标识（留空使用 hostname）
   cluster_secret: ""       # 集群共享密钥
-  peers:
+  peers: []
     # - url: "http://10.0.0.2:8900"
     #   token: "peer-token"
 
@@ -668,10 +689,6 @@ alert:
   #   ddos: "🚨 DDoS | {{src_ip}} | {{count}} SYN/{{window}}s"
 
 storage:
-  type: "both"
-  memory:
-    max_items: 100000
-    ttl: 1h
   sqlite:
     path: "${DATA_DIR}/monitor.db"
 
@@ -707,7 +724,7 @@ autopilot:
   backup_dir: "${DATA_DIR}/backups"
   auto_update: true
   update_check_interval: 12h
-  auto_update_apply: true
+  auto_update_apply: false
 EOF
 }
 
@@ -961,7 +978,7 @@ do_reload() {
         return 1
     fi
     local pid
-    pid=$(pgrep -x "port-monitor" || true)
+    pid=$(_service_pid)
     if [ -z "$pid" ]; then
         error "未找到 port-monitor 进程"
         return 1
@@ -1000,14 +1017,15 @@ do_view_bans() {
     local ips=""
     case "$backend" in
         iptables)
-            ips=$(iptables -L INPUT -n 2>/dev/null | grep DROP | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
-            ips+=$'\n'$(ip6tables -L INPUT -n 2>/dev/null | grep DROP | grep -oE '([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}' || true)
+            ips=$(iptables -L INPUT -n 2>/dev/null | grep -E 'DROP|REJECT' | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
+            ips+=$'\n'$(ip6tables -L INPUT -n 2>/dev/null | grep -E 'DROP|REJECT' | grep -oE '([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}' || true)
             ;;
         firewalld)
             ips=$(firewall-cmd --list-rich-rules 2>/dev/null | grep -oP "address='\\K[^']+" || true)
             ;;
         nftables)
-            ips=$(nft list ruleset 2>/dev/null | grep -oP '(?:ip|ip6) saddr \K\S+' || true)
+            # 引擎把封禁写在私有表 inet portsentinel，优先读它，回退到全量规则集
+            ips=$( { nft list chain inet portsentinel input 2>/dev/null || nft list ruleset 2>/dev/null; } | grep -oP '(?:ip|ip6) saddr \K\S+' || true)
             ;;
         *)
             warn "无法检测防火墙后端，请手动检查"
@@ -1026,39 +1044,19 @@ do_unban() {
     check_root
     local ip
     ip=$(ask "要解封的IP")
-    if _validate_ip "$ip"; then
-        local backend
-        backend=$(get_firewall_backend)
-        local v6=false
-        _is_ipv6 "$ip" && v6=true
-        case "$backend" in
-            iptables)
-                local cmd="iptables"
-                $v6 && cmd="ip6tables"
-                $cmd -D INPUT -s "$ip" -j DROP 2>/dev/null && info "已解封 $ip" || warn "[LIN] IP不在封禁列表"
-                ;;
-            firewalld)
-                local family="ipv4"
-                $v6 && family="ipv6"
-                firewall-cmd --remove-rich-rule="rule family='$family' source address='$ip' reject" --permanent 2>/dev/null \
-                    && firewall-cmd --reload 2>/dev/null \
-                    && info "已解封 $ip" \
-                    || warn "[LIN] IP不在封禁列表"
-                ;;
-            nftables)
-                local addr_type="ip"
-                $v6 && addr_type="ip6"
-                nft delete rule inet filter input $addr_type saddr "$ip" drop 2>/dev/null \
-                    && info "已解封 $ip" \
-                    || warn "[LIN] IP不在封禁列表"
-                ;;
-            *)
-                error "未知防火墙后端，请手动解封"
-                ;;
-        esac
-    else
+    if ! _validate_ip "$ip"; then
         error "IP格式不正确"
+        return 1
     fi
+    # 交给引擎统一处理：同时清理防火墙规则与数据库记录
+    # 否则重启后 _restore_bans 会按残留记录把 IP 重新封回去
+    local out
+    out=$(/usr/local/bin/port-monitor -config "$CONFIG_FILE" unban "$ip" 2>&1) || {
+        error "解封失败，请查看日志: ${LOG_DIR}/port-monitor.log"
+        printf '%b\n' "  $out"
+        return 1
+    }
+    printf '%b\n' "  ${out}"
 }
 
 # ── 白名单管理 ─────────────────────────────────────────────────
@@ -1778,7 +1776,7 @@ do_stats() {
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         printf '%b\n' "  状态: ${GREEN}运行中${NC}"
         local pid
-        pid=$(pgrep -x "port-monitor" || true)
+        pid=$(_service_pid)
         if [ -n "$pid" ]; then
             ps -p "$pid" -o pid,pcpu,pmem,etime --no-headers | awk '{printf "  PID: %s  CPU: %s%%  内存: %s%%  运行: %s\n",$1,$2,$3,$4}'
         fi
@@ -1789,7 +1787,7 @@ do_stats() {
             api_token=$(grep -A5 '^api:' "$CONFIG_FILE" 2>/dev/null | grep 'token:' | awk '{print $2}' | tr -d '"')
             if [ -n "$api_port" ] && [ -n "$api_token" ]; then
                 local api_resp
-                api_resp=$(curl -s "http://127.0.0.1:${api_port}/api/status?token=${api_token}" --connect-timeout 3 --max-time 5 2>/dev/null)
+                api_resp=$(curl -s -H "X-API-Token: ${api_token}" "http://127.0.0.1:${api_port}/api/status" --connect-timeout 3 --max-time 5 2>/dev/null)
                 if echo "$api_resp" | grep -q '"version"'; then
                     local ver uptime_s packets ban_hits
                     ver=$(echo "$api_resp" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
@@ -2011,7 +2009,7 @@ do_health_check() {
     printf '%b\n' "  ${CYAN}[1/8]${NC} 服务进程..."
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         local pid
-        pid=$(pgrep -x "port-monitor" || true)
+        pid=$(_service_pid)
         info "运行中 [PID: ${pid:-未知}]"
     else
         warn "[LIN] 服务未运行"
@@ -2106,7 +2104,7 @@ do_health_check() {
     printf '%b\n' "  ${CYAN}[8/8]${NC} 服务资源占用..."
     if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
         local pid
-        pid=$(pgrep -x "port-monitor" || true)
+        pid=$(_service_pid)
         if [ -n "$pid" ]; then
             local cpu mem mem_kb uptime_str
             read -r cpu mem < <(ps -p "$pid" -o %cpu,%mem --no-headers 2>/dev/null || echo "0 0")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LIN-PortSentinel - Port Security Monitor Engine v1.0.2
+LIN-PortSentinel - Port Security Monitor Engine v1.0.3
 Your Ports, Our Watch.
 Author: LIN | github.com/linjunhao024-byte/PortSentinel
 """
@@ -34,7 +34,7 @@ from smtplib import SMTP, SMTP_SSL
 
 # ── 全局常量 ─────────────────────────────────────────────────
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 SYSLOG_TAG = "port-monitor"
 PERMANENT_BAN_SECONDS = 87600 * 3600  # ~10 年，用作永久封禁标记
 
@@ -68,93 +68,181 @@ def setup_logging(log_path=None):
 # ── 轻量 YAML 解析 ───────────────────────────────────────────
 
 def _yaml_parse(text):
-    """解析本项目生成的 YAML 子集：key: value、嵌套缩进、列表（含多字段 dict 项）。"""
-    root = {}
-    stack = [(root, -1)]
-    list_key = None
-    current_item = None  # 当前正在构建的列表 dict 项
-    current_item_indent = -1
+    """解析本项目使用的 YAML 子集。
 
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        if not line or line.lstrip().startswith("#"):
+    支持：key: value、嵌套映射、块状列表（标量项与多字段 dict 项）、
+    行内流式列表/映射（[] / {}）、单双引号、行尾注释、重复键告警。
+    """
+    lines = _yaml_lines(text)
+    if not lines:
+        return {}
+    node, _ = _yaml_node(lines, 0, lines[0][0])
+    return node if isinstance(node, dict) else {"_root": node}
+
+
+def _yaml_lines(text):
+    """预处理：去注释、去空行、制表符展开，返回 [(缩进, 内容), ...]。"""
+    out = []
+    for raw in text.splitlines():
+        line = raw.replace("\t", "    ").rstrip()
+        stripped = _strip_comment(line)
+        if not stripped.strip():
             continue
-
-        indent = len(line) - len(line.lstrip())
-        stripped = line.lstrip()
-
-        # 列表项续行：缩进比列表头更深，且当前有一个 dict 项在构建
-        if (current_item is not None
-                and indent > current_item_indent
-                and not stripped.startswith("- ")
-                and ":" in stripped):
-            k, v = stripped.split(":", 1)
-            current_item[k.strip()] = _yaml_value(v.strip())
+        body = stripped.lstrip(" ")
+        if body.startswith("#") or body in ("---", "...") or body.startswith("%"):
             continue
+        out.append((len(stripped) - len(body), body))
+    return out
 
-        # 新行不是续行，结束当前列表项
-        if current_item is not None and (not stripped.startswith("- ") or indent <= current_item_indent):
-            current_item = None
 
-        # 回退到正确的缩进层级
-        while len(stack) > 1 and indent <= stack[-1][1]:
-            stack.pop()
-
-        parent = stack[-1][0]
-
-        if stripped.startswith("- "):
-            val = stripped[2:].strip()
-            if list_key and list_key in parent:
-                target = parent[list_key]
-                if isinstance(target, list):
-                    # 仅当冒号后跟空格时才视为 dict 项（避免 URL 等含冒号值被误判）
-                    colon_pos = val.find(":")
-                    if (colon_pos > 0 and colon_pos + 1 < len(val)
-                            and val[colon_pos + 1] == " "
-                            and not val.startswith('"')):
-                        # dict 列表项的第一行
-                        item = {}
-                        k, v = val.split(":", 1)
-                        item[k.strip()] = _yaml_value(v.strip())
-                        target.append(item)
-                        current_item = item
-                        current_item_indent = indent
-                    else:
-                        target.append(_yaml_value(_handle_strip_comments(val)))
-                        current_item = None
-            list_key = None
+def _strip_comment(line):
+    """去掉不在引号内的行尾 # 注释（要求 # 前是空白或行首）。"""
+    quote = None
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = None
             continue
+        if ch in ('"', "'"):
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in (" ", "\t")):
+            return line[:i].rstrip()
+    return line
 
-        if ":" in stripped:
-            key, val = stripped.split(":", 1)
-            key = key.strip().strip('"')
-            val = val.strip()
-            current_item = None
 
-            if val == "":
-                node = {}
-                parent[key] = node
-                stack.append((node, indent))
-                list_key = None
-            elif val == "[]":
-                parent[key] = []
-                list_key = key
+def _yaml_node(lines, idx, indent):
+    """按缩进解析一个节点：映射或列表。返回 (节点, 下一行下标)。"""
+    if idx < len(lines) and _is_list_item(lines[idx][1]):
+        return _yaml_list(lines, idx, indent)
+    return _yaml_map(lines, idx, indent)
+
+
+def _is_list_item(content):
+    return content == "-" or content.startswith("- ")
+
+
+def _yaml_map(lines, idx, indent):
+    node = {}
+    while idx < len(lines):
+        cur_indent, content = lines[idx]
+        if cur_indent < indent:
+            break
+        if cur_indent > indent:
+            logger.warning("[LIN] YAML 缩进异常(第%d层): %r", cur_indent, content)
+            break
+        if _is_list_item(content):
+            break
+        pair = _yaml_split_pair(content)
+        if pair is None:
+            logger.warning("[LIN] YAML 忽略无法解析的行: %r", content)
+            idx += 1
+            continue
+        key, value = pair
+        idx += 1
+        if key in node:
+            logger.warning("[LIN] YAML 重复键 %r，后者覆盖前者", key)
+        if value == "":
+            if idx < len(lines) and lines[idx][0] > cur_indent:
+                child, idx = _yaml_node(lines, idx, lines[idx][0])
+                node[key] = child
+            elif idx < len(lines) and lines[idx][0] == cur_indent and _is_list_item(lines[idx][1]):
+                child, idx = _yaml_list(lines, idx, cur_indent)
+                node[key] = child
             else:
-                parent[key] = _yaml_value(_handle_strip_comments(val))
-                list_key = None
+                node[key] = {}
+        else:
+            node[key] = _yaml_value(value)
+    return node, idx
 
-    return root
+
+def _yaml_list(lines, idx, indent):
+    items = []
+    while idx < len(lines):
+        cur_indent, content = lines[idx]
+        if cur_indent < indent or not _is_list_item(content):
+            break
+        if cur_indent > indent:
+            break
+        rest = content[1:].strip()
+        idx += 1
+        if rest == "":
+            if idx < len(lines) and lines[idx][0] > cur_indent:
+                child, idx = _yaml_node(lines, idx, lines[idx][0])
+                items.append(child)
+            else:
+                items.append(None)
+            continue
+        pair = _yaml_split_pair(rest)
+        if pair is not None:
+            key, value = pair
+            item = {}
+            if value == "":
+                if idx < len(lines) and lines[idx][0] > cur_indent:
+                    child, idx = _yaml_node(lines, idx, lines[idx][0])
+                    item[key] = child
+                else:
+                    item[key] = {}
+            else:
+                item[key] = _yaml_value(value)
+            # 同一列表项的多字段续行（缩进深于 '-' 所在列）
+            while (idx < len(lines) and lines[idx][0] > cur_indent
+                   and not _is_list_item(lines[idx][1])):
+                extra_indent = lines[idx][0]
+                extra, idx = _yaml_map(lines, idx, extra_indent)
+                for k, v in extra.items():
+                    item[k] = v
+            items.append(item)
+        else:
+            items.append(_yaml_value(rest))
+    return items, idx
+
+
+def _yaml_split_pair(content):
+    """拆出 'key: value'；冒号必须是分隔符（后接空白或行尾），否则返回 None。
+
+    避免把 http://host:8900 这类值误判成键值对。
+    """
+    quote = None
+    for i, ch in enumerate(content):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            continue
+        if ch == ":" and (i + 1 == len(content) or content[i + 1] == " "):
+            key = content[:i].strip().strip('"').strip("'")
+            if not key:
+                return None
+            return key, content[i + 1:].strip()
+    return None
 
 
 def _yaml_value(s):
-    if s.startswith('"') and s.endswith('"'):
-        return s[1:-1]
-    if s.startswith("'") and s.endswith("'"):
-        return s[1:-1]
+    s = s.strip()
+    if not s:
+        return ""
+    if s.startswith("[") and s.endswith("]"):
+        return [_yaml_value(part) for part in _yaml_split_flow(s[1:-1])]
+    if s.startswith("{") and s.endswith("}"):
+        result = {}
+        for part in _yaml_split_flow(s[1:-1]):
+            pair = _yaml_split_pair(part) or _yaml_split_pair(part.replace(":", ": "))
+            if pair:
+                result[pair[0]] = _yaml_value(pair[1])
+        return result
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        body = s[1:-1]
+        if s[0] == '"':
+            body = body.replace('\\"', '"').replace("\\\\", "\\")
+        else:
+            body = body.replace("''", "'")
+        return body
     low = s.lower()
-    if low == "true":
+    if low in ("true", "yes", "on"):
         return True
-    if low == "false":
+    if low in ("false", "no", "off"):
         return False
     if low in ("null", "~"):
         return None
@@ -169,17 +257,41 @@ def _yaml_value(s):
     return s
 
 
+def _yaml_split_flow(text):
+    """按顶层逗号切分行内流式集合内容。"""
+    parts = []
+    buf = ""
+    depth = 0
+    quote = None
+    for ch in text:
+        if quote:
+            buf += ch
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf += ch
+            continue
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(buf)
+            buf = ""
+            continue
+        buf += ch
+    if buf.strip():
+        parts.append(buf)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def _handle_strip_comments(s):
-    """去除 YAML 值中的行尾注释（不在引号内的 # 注释）。"""
-    in_quote = None
-    for i, ch in enumerate(s):
-        if ch in ('"', "'") and in_quote is None:
-            in_quote = ch
-        elif ch == in_quote:
-            in_quote = None
-        elif ch == '#' and in_quote is None and i > 0 and s[i - 1] == ' ':
-            return s[:i - 1].rstrip()
-    return s
+    """兼容旧调用：去除行尾注释。"""
+    return _strip_comment(s).strip()
+
+
 
 
 def load_config(path):
@@ -188,13 +300,33 @@ def load_config(path):
     return _yaml_parse(text)
 
 
+def _to_int(value, default=None):
+    """宽松取整：失败或空值返回默认值，避免配置写错时抛异常。"""
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def validate_config(config):
     """校验配置合法性，返回 (warnings, errors) 列表。"""
     warnings = []
     errors = []
 
+    if not isinstance(config, dict):
+        return warnings, [f"配置根节点不是映射: {type(config).__name__}"]
+
+    def section(name):
+        value = config.get(name, {})
+        if not isinstance(value, dict):
+            errors.append(f"{name} 应为映射，实际是 {type(value).__name__}")
+            return {}
+        return value
+
     # 监控间隔
-    interval = config.get("monitor", {}).get("interval", "5s")
+    interval = section("monitor").get("interval", "5s")
     sec = parse_duration(interval)
     if sec < 1:
         errors.append(f"monitor.interval 过小: {interval}")
@@ -202,60 +334,110 @@ def validate_config(config):
         warnings.append(f"monitor.interval 过小 ({interval})，可能影响性能")
 
     # 检测规则
-    rules = config.get("rules", {})
-    scan = rules.get("port_scan", {})
+    rules = section("rules")
+    scan = rules.get("port_scan", {}) if isinstance(rules.get("port_scan", {}), dict) else {}
     thresholds = scan.get("thresholds", {})
-    if thresholds.get("low", 0) >= thresholds.get("medium", 10):
-        errors.append("port_scan.thresholds.low 应小于 medium")
-    if thresholds.get("medium", 0) >= thresholds.get("high", 50):
-        errors.append("port_scan.thresholds.medium 应小于 high")
+    if not isinstance(thresholds, dict):
+        errors.append("port_scan.thresholds 应为映射")
+        thresholds = {}
+    low = _to_int(thresholds.get("low"), 10)
+    medium = _to_int(thresholds.get("medium"), 20)
+    high = _to_int(thresholds.get("high"), 100)
+    for key in ("low", "medium", "high", "critical"):
+        if key in thresholds and _to_int(thresholds[key]) is None:
+            errors.append(f"port_scan.thresholds.{key} 不是数字: {thresholds[key]!r}")
+    if low is None or medium is None or high is None:
+        errors.append("port_scan.thresholds 存在非数字阈值")
+    else:
+        if low >= medium:
+            errors.append("port_scan.thresholds.low 应小于 medium")
+        if medium >= high:
+            errors.append("port_scan.thresholds.medium 应小于 high")
 
     # 暴力破解端口
-    for p in rules.get("brute_force", {}).get("sensitive_ports", []):
-        if isinstance(p, dict):
-            port = p.get("port")
-            if not port:
-                errors.append("brute_force.sensitive_ports 中缺少 port 字段")
-            elif not (1 <= int(port) <= 65535):
-                errors.append(f"brute_force 端口无效: {port}")
+    brute = rules.get("brute_force", {}) if isinstance(rules.get("brute_force", {}), dict) else {}
+    brute_ports = brute.get("sensitive_ports", [])
+    if not isinstance(brute_ports, list):
+        errors.append("brute_force.sensitive_ports 应为列表（块状列表需每项以 '-' 开头）")
+        brute_ports = []
+    for p in brute_ports:
+        if not isinstance(p, dict):
+            errors.append(f"brute_force.sensitive_ports 存在非映射项: {p!r}")
+            continue
+        port = _to_int(p.get("port"))
+        if port is None:
+            errors.append("brute_force.sensitive_ports 中缺少或无效的 port 字段")
+        elif not (1 <= port <= 65535):
+            errors.append(f"brute_force 端口无效: {port}")
 
     # 蜜罐端口
-    hp = config.get("honeypot", {})
+    hp = section("honeypot")
     if hp.get("enabled"):
         hp_ports = hp.get("ports", [])
+        if not isinstance(hp_ports, list):
+            errors.append("honeypot.ports 应为列表")
+            hp_ports = []
         if not hp_ports:
             errors.append("honeypot.enabled=true 但未配置端口")
-        # 检查蜜罐端口是否与敏感端口冲突
-        brute_ports = {int(p.get("port", 0)) for p in
-                       rules.get("brute_force", {}).get("sensitive_ports", [])
-                       if isinstance(p, dict)}
+        brute_set = {_to_int(p.get("port"), 0) for p in brute_ports if isinstance(p, dict)}
         for p in hp_ports:
-            if int(p) in brute_ports:
-                warnings.append(f"蜜罐端口 {p} 与暴力破解敏感端口冲突")
+            port = _to_int(p)
+            if port is None:
+                errors.append(f"honeypot 端口无效: {p!r}")
+            elif port in brute_set:
+                warnings.append(f"蜜罐端口 {port} 与暴力破解敏感端口冲突")
 
     # 防火墙方法
-    method = config.get("ban", {}).get("method", "iptables")
+    ban_cfg = section("ban")
+    method = ban_cfg.get("method", "iptables")
     if method not in ("iptables", "firewalld", "nftables"):
         errors.append(f"未知的 ban.method: {method}")
+    mode = ban_cfg.get("mode", "drop")
+    if mode not in ("drop", "reject", "rate_limit"):
+        errors.append(f"未知的 ban.mode: {mode}（应为 drop/reject/rate_limit）")
+    whitelist = ban_cfg.get("whitelist", [])
+    if not isinstance(whitelist, list):
+        errors.append("ban.whitelist 应为列表（块状列表需每项以 '-' 开头），否则白名单不生效")
+        whitelist = []
+    for entry in whitelist:
+        text = str(entry).strip()
+        try:
+            ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            errors.append(f"ban.whitelist 条目不是合法 IP/CIDR: {text}")
 
     # API 配置
-    api = config.get("api", {})
+    api = section("api")
     if api.get("enabled"):
-        port = int(api.get("port", 0))
-        if not (1 <= port <= 65535):
-            errors.append(f"api.port 无效: {port}")
-        if not api.get("token"):
-            warnings.append("api.enabled=true 但未设置 token，存在安全风险")
+        port = _to_int(api.get("port"))
+        if port is None or not (1 <= port <= 65535):
+            errors.append(f"api.port 无效: {api.get('port')!r}")
+        token = str(api.get("token") or "").strip()
+        if not token:
+            errors.append("api.enabled=true 但 token 为空 —— 等于开放无鉴权控制面，已拒绝启动 API")
+        elif token in ("change-me-to-a-secure-token", "changeme", "token"):
+            errors.append(f"api.token 仍是示例默认值 {token!r}，请改为随机串")
+        if str(api.get("host", "")) in ("0.0.0.0", "::"):
+            warnings.append("api.host 监听所有网卡，请确认已配置 token 且端口不对公网开放")
 
     # 分布式联动
-    fed = config.get("federation", {})
+    fed = section("federation")
     if fed.get("enabled"):
         peers = fed.get("peers", [])
+        if not isinstance(peers, list):
+            errors.append("federation.peers 应为列表")
+            peers = []
         if not peers:
             errors.append("federation.enabled=true 但未配置 peers")
         for i, peer in enumerate(peers):
             if isinstance(peer, dict) and not peer.get("url"):
                 errors.append(f"federation.peers[{i}] 缺少 url")
+
+    # 自动更新：远程下发 root 代码，默认必须关闭
+    autopilot = section("autopilot")
+    if autopilot.get("enabled") and autopilot.get("auto_update_apply"):
+        warnings.append("autopilot.auto_update_apply=true 会在无签名校验下自动替换 "
+                        "/usr/local/bin/port-monitor 并重启（root 权限），建议改为 false")
 
     return warnings, errors
 
@@ -377,7 +559,15 @@ class Database:
                     self.conn.commit()
                     logger.info("[LIN] 数据库迁移到 v%d 完成", ver)
                 except sqlite3.OperationalError as e:
-                    logger.debug("迁移 v%d 跳过: %s", ver, e)
+                    # 回滚未完成的部分，避免半迁移状态被当成已完成
+                    try:
+                        self.conn.rollback()
+                    except Exception:
+                        pass
+                    if "duplicate column" in str(e).lower():
+                        logger.debug("迁移 v%d 已应用过: %s", ver, e)
+                    else:
+                        logger.warning("[LIN] 数据库迁移 v%d 失败，已回滚: %s", ver, e)
 
     def _load_blocked_cache(self):
         with self._lock:
@@ -412,12 +602,39 @@ class Database:
                 time.localtime(time.time() + duration_sec))
             perm = 0
         with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO blocked_ips "
-                "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?)",
-                (ip, attack_type, now, unblock_at, perm))
+            try:
+                # UPSERT：续封只刷新时长/类型，保留首次封禁时间
+                self.conn.execute(
+                    "INSERT INTO blocked_ips "
+                    "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(ip) DO UPDATE SET "
+                    "attack_type=excluded.attack_type, "
+                    "unblock_at=excluded.unblock_at, permanent=excluded.permanent",
+                    (ip, attack_type, now, unblock_at, perm))
+            except sqlite3.OperationalError:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO blocked_ips "
+                    "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?)",
+                    (ip, attack_type, now, unblock_at, perm))
             self.conn.commit()
             self._blocked_cache.add(ip)
+
+    def fetchall(self, sql, params=()):
+        """带锁读：API 线程与检测线程共用同一 sqlite 连接。"""
+        with self._lock:
+            cur = self.conn.execute(sql, params)
+            return cur.fetchall()
+
+    def fetchone(self, sql, params=()):
+        with self._lock:
+            cur = self.conn.execute(sql, params)
+            return cur.fetchone()
+
+    def execute_write(self, sql, params=()):
+        with self._lock:
+            cur = self.conn.execute(sql, params)
+            self.conn.commit()
+            return cur
 
     def unblock_ip(self, ip):
         with self._lock:
@@ -444,12 +661,50 @@ class Database:
 # ── 防火墙执行 ────────────────────────────────────────────────
 
 class Firewall:
+    # nftables 使用私有表，避免污染系统 filter 表
+    _NFT_TABLE = "portsentinel"
+    _NFT_CHAIN = "input"
+
     def __init__(self, method, whitelist=None, ban_mode="drop"):
         self.method = method
         self.ban_mode = ban_mode  # "drop" | "reject" | "rate_limit"
-        self.whitelist = set(whitelist or [])
+        if not isinstance(whitelist, (list, tuple, set)):
+            logger.warning("[LIN] ban.whitelist 不是列表，已忽略（块状列表需每项以 '-' 开头）")
+            whitelist = []
+        self.whitelist = {str(e).strip() for e in whitelist if str(e).strip()}
         self.whitelist.add("127.0.0.1")
         self.whitelist.add("::1")
+
+    def _ensure_nft(self):
+        """幂等创建私有 nft 表与 input 链，返回是否可用。"""
+        try:
+            probe = subprocess.run(
+                ["nft", "list", "table", "inet", self._NFT_TABLE],
+                capture_output=True, timeout=10)
+            if probe.returncode == 0:
+                return True
+            subprocess.run(["nft", "add", "table", "inet", self._NFT_TABLE],
+                           capture_output=True, timeout=10)
+            add_chain = subprocess.run(
+                ["nft", "add", "chain", "inet", self._NFT_TABLE, self._NFT_CHAIN,
+                 "{ type filter hook input priority 0 ; }"],
+                capture_output=True, timeout=10)
+            if add_chain.returncode != 0:
+                logger.error("nftables 建链失败: %s",
+                             add_chain.stderr.decode(errors="replace").strip())
+                return False
+            logger.info("[LIN] nftables 已建立私有表 %s:%s",
+                        self._NFT_TABLE, self._NFT_CHAIN)
+            return True
+        except Exception as e:
+            logger.error("nftables 初始化失败: %s", e)
+            return False
+
+    def _hashlimit_name(self, ip):
+        """iptables hashlimit 规则名：限长 15 字符，用哈希避免 IPv6 截断撞名。"""
+        digest = hashlib.sha1(ip.encode()).hexdigest()[:10]
+        return f"ps_{digest}"
+
 
     def is_whitelisted(self, ip):
         ip = normalize_ip(ip)
@@ -491,13 +746,13 @@ class Firewall:
                     return True
                 # 限速模式：先添加 hashlimit ACCEPT 规则
                 if self.ban_mode == "rate_limit":
-                    safe_name = ip.replace(".", "_").replace(":", "_")[:16]
+                    limit_name = self._hashlimit_name(ip)
                     subprocess.run(
                         [cmd, "-I", "INPUT", "-s", ip,
                          "-m", "hashlimit",
                          "--hashlimit", "2/sec",
                          "--hashlimit-burst", "5",
-                         "--hashlimit-name", f"ps_{safe_name}",
+                         "--hashlimit-name", limit_name,
                          "--hashlimit-mode", "srcip",
                          "-j", "ACCEPT"],
                         capture_output=True, timeout=10)
@@ -515,10 +770,14 @@ class Firewall:
                     ["firewall-cmd", "--reload"],
                     capture_output=True, timeout=10)
             elif self.method == "nftables":
+                if not self._ensure_nft():
+                    return False
                 addr_type = "ip6" if v6 else "ip"
+                target_nft = "reject" if self.ban_mode == "reject" else "drop"
                 result = subprocess.run([
-                    "nft", "add", "rule", "inet", "filter", "input",
-                    addr_type, "saddr", ip, "drop"], capture_output=True, timeout=10)
+                    "nft", "add", "rule", "inet", self._NFT_TABLE, self._NFT_CHAIN,
+                    addr_type, "saddr", ip, target_nft],
+                    capture_output=True, timeout=10)
             else:
                 logger.warning("未知防火墙方法: %s", self.method)
                 return False
@@ -535,64 +794,89 @@ class Firewall:
             return False
 
     def unban(self, ip):
+        """解封并核验残留：True 表示已确认不再存在该 IP 的封禁规则。"""
         try:
             v6 = is_ipv6(ip)
-            target = "REJECT" if self.ban_mode == "reject" else "DROP"
+            cmd = "ip6tables" if v6 else "iptables"
 
             if self.method == "iptables":
-                cmd = "ip6tables" if v6 else "iptables"
-                # 限速模式：先移除 hashlimit ACCEPT 规则
                 if self.ban_mode == "rate_limit":
-                    safe_name = ip.replace(".", "_").replace(":", "_")[:16]
+                    limit_name = self._hashlimit_name(ip)
                     subprocess.run(
                         [cmd, "-D", "INPUT", "-s", ip,
                          "-m", "hashlimit",
                          "--hashlimit", "2/sec",
                          "--hashlimit-burst", "5",
-                         "--hashlimit-name", f"ps_{safe_name}",
+                         "--hashlimit-name", limit_name,
                          "--hashlimit-mode", "srcip",
                          "-j", "ACCEPT"],
                         capture_output=True, timeout=10)
-                result = subprocess.run(
-                    [cmd, "-D", "INPUT", "-s", ip, "-j", target],
-                    capture_output=True, timeout=10)
+                # 两种 target 都尝试删除：ban_mode 运行中被改过时仍能解封干净
+                for target in ("DROP", "REJECT"):
+                    subprocess.run(
+                        [cmd, "-D", "INPUT", "-s", ip, "-j", target],
+                        capture_output=True, timeout=10)
+                remaining = [
+                    t for t in ("DROP", "REJECT")
+                    if subprocess.run(
+                        [cmd, "-C", "INPUT", "-s", ip, "-j", t],
+                        capture_output=True, timeout=10).returncode == 0
+                ]
+                if remaining:
+                    logger.error("[LIN] 解封 %s 失败，规则仍残留: -j %s",
+                                 ip, "/".join(remaining))
+                    return False
             elif self.method == "firewalld":
                 family = "ipv6" if v6 else "ipv4"
-                action = "reject" if self.ban_mode == "reject" else "drop"
-                result = subprocess.run([
-                    "firewall-cmd", "--remove-rich-rule",
-                    f"rule family='{family}' source address='{ip}' {action}",
-                    "--permanent"], capture_output=True, timeout=10)
-                subprocess.run(
-                    ["firewall-cmd", "--reload"],
-                    capture_output=True, timeout=10)
-            elif self.method == "nftables":
-                result = subprocess.run(
-                    ["nft", "-a", "list", "chain", "inet", "filter", "input"],
+                for action in ("reject", "drop"):
+                    subprocess.run([
+                        "firewall-cmd", "--remove-rich-rule",
+                        f"rule family='{family}' source address='{ip}' {action}",
+                        "--permanent"], capture_output=True, timeout=10)
+                subprocess.run(["firewall-cmd", "--reload"],
+                               capture_output=True, timeout=10)
+                listed = subprocess.run(
+                    ["firewall-cmd", "--list-rich-rules"],
                     capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    addr_type = "ip6" if v6 else "ip"
-                    pattern = re.compile(
-                        rf'{addr_type} saddr {re.escape(ip)}.*drop')
-                    for line in result.stdout.splitlines():
-                        if pattern.search(line):
-                            handle_match = re.search(
-                                r'\bhandle\s+(\d+)\b', line)
-                            if handle_match:
-                                subprocess.run([
-                                    "nft", "delete", "rule", "inet", "filter",
-                                    "input", "handle", handle_match.group(1)],
-                                    capture_output=True, timeout=10)
-                            else:
-                                logger.warning("nftables 解封: 无法提取 handle: %s", line.strip())
-                            break
+                if re.search(rf"address='{re.escape(ip)}'", listed.stdout or ""):
+                    logger.error("[LIN] 解封 %s 失败：firewalld 仍有对应 rich rule", ip)
+                    return False
+            elif self.method == "nftables":
+                if not self._ensure_nft():
+                    return False
+                pattern = re.compile(rf"\b(?:ip|ip6)\s+saddr\s+{re.escape(ip)}\b")
+                listed = subprocess.run(
+                    ["nft", "-a", "list", "chain", "inet",
+                     self._NFT_TABLE, self._NFT_CHAIN],
+                    capture_output=True, text=True, timeout=10)
+                if listed.returncode != 0:
+                    logger.info("[LIN] nftables 中不存在私有链，%s 无需解封", ip)
+                    return True
+                deleted = 0
+                for line in listed.stdout.splitlines():
+                    if not pattern.search(line):
+                        continue
+                    handle_match = re.search(r"\bhandle\s+(\d+)\b", line)
+                    if not handle_match:
+                        logger.warning("nftables 解封: 无法提取 handle: %s", line.strip())
+                        continue
+                    rc = subprocess.run(
+                        ["nft", "delete", "rule", "inet", self._NFT_TABLE,
+                         self._NFT_CHAIN, "handle", handle_match.group(1)],
+                        capture_output=True, timeout=10)
+                    if rc.returncode == 0:
+                        deleted += 1
+                relisted = subprocess.run(
+                    ["nft", "list", "chain", "inet",
+                     self._NFT_TABLE, self._NFT_CHAIN],
+                    capture_output=True, text=True, timeout=10)
+                if pattern.search(relisted.stdout or ""):
+                    logger.error("[LIN] 解封 %s 失败：nft 规则仍残留（已删 %d 条）",
+                                 ip, deleted)
+                    return False
             else:
+                logger.warning("未知防火墙方法，无法解封: %s", self.method)
                 return False
-
-            if hasattr(result, "returncode") and result.returncode != 0:
-                stderr = result.stderr.decode(errors="replace").strip()
-                if "No chain" not in stderr and "No such file" not in stderr:
-                    logger.warning("解封命令返回非零: %s: %s", ip, stderr)
 
             logger.info("[LIN] 已解封: %s", ip)
             return True
@@ -1153,7 +1437,7 @@ class ResponseManager:
     def __init__(self, config):
         resp_cfg = config.get("response", {})
         self._enabled = resp_cfg.get("enabled", False)
-        self._actions = resp_cfg.get("actions", [])
+        self._actions = resp_cfg.get("actions") or []
         self._queue = queue.Queue(maxsize=5000)
         self._stopping = threading.Event()
         if self._enabled and self._actions:
@@ -1428,7 +1712,7 @@ class FederationManager:
         self._secret = self._cfg.get("cluster_secret", "")
         self._node_id = self._cfg.get("node_id", socket.gethostname())
         self._peers = []
-        for p in self._cfg.get("peers", []):
+        for p in self._cfg.get("peers") or []:
             if isinstance(p, dict) and p.get("url"):
                 self._peers.append({"url": p["url"].rstrip("/"), "token": p.get("token", "")})
         self._db = db
@@ -1617,11 +1901,20 @@ class Autopilot:
             checks["database"] = False
         # 3. 防火墙可用性
         try:
-            if engine.firewall.method == "iptables":
-                subprocess.run(["iptables", "-L", "-n"], capture_output=True, timeout=5)
-            elif engine.firewall.method == "nftables":
-                subprocess.run(["nft", "list", "ruleset"], capture_output=True, timeout=5)
-            checks["firewall"] = True
+            method = engine.firewall.method
+            if method == "iptables":
+                probe = subprocess.run(["iptables", "-L", "-n"],
+                                       capture_output=True, timeout=5)
+                checks["firewall"] = probe.returncode == 0
+            elif method == "nftables":
+                # 用"能建表"作为可用判据，而不是 list ruleset 是否返回 0
+                checks["firewall"] = engine.firewall._ensure_nft()
+            elif method == "firewalld":
+                probe = subprocess.run(["firewall-cmd", "--state"],
+                                       capture_output=True, timeout=5)
+                checks["firewall"] = probe.returncode == 0
+            else:
+                checks["firewall"] = False
         except Exception:
             checks["firewall"] = False
         # 4. 磁盘空间
@@ -1658,9 +1951,13 @@ class Autopilot:
 
         if "database" in issues:
             try:
-                logger.info("Autopilot: 尝试修复数据库...")
-                self._engine.db.conn.execute("PRAGMA integrity_check")
-                healed.append("database")
+                logger.info("Autopilot: 检查数据库完整性与可读性...")
+                row = self._engine.db.fetchone("PRAGMA integrity_check")
+                if row and str(row[0]).lower() == "ok":
+                    self._engine.db.fetchone("SELECT COUNT(*) FROM attacks")
+                    healed.append("database")
+                else:
+                    raise sqlite3.DatabaseError(f"integrity_check={row}")
             except Exception:
                 try:
                     logger.warning("Autopilot: 数据库损坏，尝试重建连接...")
@@ -1689,8 +1986,13 @@ class Autopilot:
         if "capture_thread" in issues:
             self._restart_attempts += 1
             self._last_restart = now
-            logger.warning("Autopilot: 抓包线程异常 (尝试 %d/%d)",
+            logger.warning("Autopilot: 抓包线程异常 (尝试 %d/%d)，请求重建 socket",
                            self._restart_attempts, self._max_restart_attempts)
+            try:
+                self._engine.request_capture_restart()
+                healed.append("capture_thread")
+            except Exception as e:
+                logger.error("Autopilot: 触发抓包重建失败: %s", e)
 
         if healed:
             logger.info("Autopilot: 已修复 %s", ", ".join(healed))
@@ -1850,6 +2152,13 @@ class Autopilot:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=30) as resp:
                 new_code = resp.read()
+            # 落地前校验：语法可编译且确实是本程序，避免把损坏/投毒内容装成 root 服务
+            try:
+                compile(new_code, "port-monitor", "exec")
+            except SyntaxError as e:
+                raise RuntimeError(f"下载内容无法编译，已中止更新: {e}")
+            if b"PortSentinel" not in new_code:
+                raise RuntimeError("下载内容不含 PortSentinel 标识，已中止更新")
             # 原子替换
             tmp = target + ".tmp"
             with open(tmp, "wb") as f:
@@ -1862,6 +2171,8 @@ class Autopilot:
                 req2 = urllib.request.Request(sh_url, method="GET")
                 with urllib.request.urlopen(req2, timeout=30) as resp2:
                     sh_code = resp2.read()
+                if b"PORTMONITOR_VERSION" not in sh_code:
+                    raise RuntimeError("管理脚本内容异常，跳过脚本更新")
                 sh_target = "/usr/local/bin/port-monitor-ctl"
                 with open(sh_target + ".tmp", "wb") as f:
                     f.write(sh_code)
@@ -1908,15 +2219,16 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
 
     engine = None  # 由 PortSentinel 启动时注入
     api_token = ""
+    timeout = 15  # 单连接读写超时，避免半开连接长期占用线程
 
     def log_message(self, format, *args):
         """重定向到 logger。"""
         logger.debug("API: %s", format % args)
 
     def _check_auth(self):
-        """Token 认证检查（常量时间比较防时序攻击）。"""
+        """Token 认证检查（常量时间比较防时序攻击）。空 token 视为拒绝，不再放行。"""
         if not self.api_token:
-            return True
+            return False
         token = None
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
@@ -2044,11 +2356,11 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self._respond(503, {"error": "引擎未就绪"})
             return
         try:
-            cur = engine.db.conn.execute(
+            rows = engine.db.fetchall(
                 "SELECT ip, attack_type, blocked_at, unblock_at, permanent "
                 "FROM blocked_ips ORDER BY blocked_at DESC")
             bans = []
-            for row in cur.fetchall():
+            for row in rows:
                 bans.append({
                     "ip": row[0], "attack_type": row[1],
                     "blocked_at": row[2], "unblock_at": row[3],
@@ -2064,23 +2376,22 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self._respond(503, {"error": "引擎未就绪"})
             return
         try:
-            db = engine.db.conn
-            total = db.execute(
-                "SELECT COUNT(*) FROM attacks").fetchone()[0]
-            blocked = db.execute(
-                "SELECT COUNT(*) FROM attacks WHERE blocked=1").fetchone()[0]
-            unique_ips = db.execute(
-                "SELECT COUNT(DISTINCT src_ip) FROM attacks").fetchone()[0]
+            db = engine.db
+            total = db.fetchone("SELECT COUNT(*) FROM attacks")[0]
+            blocked = db.fetchone(
+                "SELECT COUNT(*) FROM attacks WHERE blocked=1")[0]
+            unique_ips = db.fetchone(
+                "SELECT COUNT(DISTINCT src_ip) FROM attacks")[0]
             by_type = {}
-            for row in db.execute(
+            for row in db.fetchall(
                     "SELECT attack_type, COUNT(*) FROM attacks "
-                    "GROUP BY attack_type").fetchall():
+                    "GROUP BY attack_type"):
                 by_type[row[0]] = row[1]
             recent = []
-            for row in db.execute(
+            for row in db.fetchall(
                     "SELECT datetime(timestamp,'localtime'), src_ip, "
                     "attack_type, dst_port, blocked "
-                    "FROM attacks ORDER BY timestamp DESC LIMIT 20").fetchall():
+                    "FROM attacks ORDER BY timestamp DESC LIMIT 20"):
                 recent.append({
                     "time": row[0], "src_ip": row[1],
                     "attack_type": row[2], "dst_port": row[3],
@@ -2102,7 +2413,7 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         if engine:
             checks["database"] = True
             try:
-                engine.db.conn.execute("SELECT 1")
+                engine.db.fetchone("SELECT 1")
             except Exception:
                 checks["database"] = False
             checks["firewall"] = True
@@ -2148,7 +2459,11 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         if not engine.db.is_blocked(ip):
             self._respond(404, {"error": f"{ip} 不在封禁列表中"})
             return
-        engine.firewall.unban(ip)
+        if not engine.firewall.unban(ip):
+            self._respond(500, {
+                "error": "解封失败：防火墙规则仍残留，已保留封禁记录",
+                "ip": ip})
+            return
         engine.db.unblock_ip(ip)
         self._respond(200, {"ok": True, "ip": ip})
 
@@ -2158,13 +2473,13 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self._respond(503, {"error": "引擎未就绪"})
             return
         try:
-            cur = engine.db.conn.execute(
+            rows = engine.db.fetchall(
                 "SELECT strftime('%Y-%m-%d %H:00:00', timestamp) as hour, "
                 "attack_type, COUNT(*) as cnt FROM attacks "
                 "WHERE timestamp >= datetime('now', '-7 days') "
                 "GROUP BY hour, attack_type ORDER BY hour")
             data = {}
-            for r in cur.fetchall():
+            for r in rows:
                 hour, atype, cnt = r
                 if hour not in data:
                     data[hour] = {}
@@ -2184,13 +2499,13 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             page = max(int(qs.get("page", ["1"])[0]), 1)
             limit = min(int(qs.get("limit", ["50"])[0]), 200)
             offset = (page - 1) * limit
-            total = engine.db.conn.execute("SELECT COUNT(*) FROM attacks").fetchone()[0]
-            cur = engine.db.conn.execute(
+            total = engine.db.fetchone("SELECT COUNT(*) FROM attacks")[0]
+            rows = engine.db.fetchall(
                 "SELECT datetime(timestamp,'localtime'), src_ip, attack_type, "
                 "dst_port, blocked FROM attacks ORDER BY timestamp DESC LIMIT ? OFFSET ?",
                 (limit, offset))
             records = [{"time": r[0], "src_ip": r[1], "attack_type": r[2],
-                        "dst_port": r[3], "blocked": bool(r[4])} for r in cur.fetchall()]
+                        "dst_port": r[3], "blocked": bool(r[4])} for r in rows]
             self._respond(200, {"total": total, "page": page, "limit": limit,
                                 "pages": (total + limit - 1) // limit, "records": records})
         except Exception:
@@ -2223,8 +2538,13 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self._respond(503, {"error": "引擎未就绪"})
             return
         qs = parse_qs(urlparse(self.path).query)
-        days = int(qs.get("days", ["30"])[0])
-        csv_data = engine.export_manager.export_csv(days)
+        days = min(max(_to_int(qs.get("days", ["30"])[0], 30), 1), 365)
+        try:
+            csv_data = engine.export_manager.export_csv(days)
+        except Exception as e:
+            logger.debug("CSV 导出失败: %s", e)
+            self._respond(500, {"error": "导出失败"})
+            return
         body = csv_data.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -2239,8 +2559,13 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self._respond(503, {"error": "引擎未就绪"})
             return
         qs = parse_qs(urlparse(self.path).query)
-        days = int(qs.get("days", ["30"])[0])
-        data = engine.export_manager.export_json(days)
+        days = min(max(_to_int(qs.get("days", ["30"])[0], 30), 1), 365)
+        try:
+            data = engine.export_manager.export_json(days)
+        except Exception as e:
+            logger.debug("JSON 导出失败: %s", e)
+            self._respond(500, {"error": "导出失败"})
+            return
         self._respond(200, data)
 
     def _handle_prometheus(self):
@@ -2397,8 +2722,10 @@ class APIServer:
         APIHandler.engine = engine
         APIHandler.api_token = self.token
         try:
-            self._server = http.server.HTTPServer(
+            self._server = http.server.ThreadingHTTPServer(
                 (self.host, self.port), APIHandler)
+            self._server.daemon_threads = True
+            self._server.request_queue_size = 64
             self._thread = threading.Thread(
                 target=self._server.serve_forever, daemon=True)
             self._thread.start()
@@ -2519,12 +2846,10 @@ class PortSentinel:
         self.check_interval = parse_duration(
             self.config.get("monitor", {}).get("interval", "5s"))
 
-        # per-IP 追踪
-        self.syn_data = defaultdict(lambda: {
-            "ports": deque(maxlen=300),
-            "timestamps": deque(maxlen=5000),
-            "port_counts": defaultdict(lambda: deque(maxlen=500)),
-        })
+        # per-IP 追踪：持久保存并按最大检测窗口滚动裁剪，避免每个分析周期清零
+        self._max_window = max(self.scan_window, self.brute_window,
+                               self.ddos_window, 60)
+        self.syn_data = defaultdict(self._new_track)
         self._data_lock = threading.Lock()
 
         # 告警冷却 + 聚合统计
@@ -2590,16 +2915,27 @@ class PortSentinel:
                 self._templates[name] = tpl
 
         self._sockets = []
+        self._capture_restart = False
         self.pkt_count = 0
         self.ban_hit_count = 0  # 被封禁 IP 的重复攻击尝试次数
         self.start_time = 0
 
         # API 服务配置
         api_cfg = self.config.get("api", {})
-        self.api_enabled = api_cfg.get("enabled", False)
-        self.api_host = api_cfg.get("host", "127.0.0.1")
-        self.api_port = int(api_cfg.get("port", 8900))
-        self.api_token = api_cfg.get("token", "")
+        if not isinstance(api_cfg, dict):
+            api_cfg = {}
+        self.api_enabled = bool(api_cfg.get("enabled", False))
+        self.api_host = str(api_cfg.get("host", "127.0.0.1") or "127.0.0.1")
+        self.api_port = _to_int(api_cfg.get("port", 8900), 8900)
+        self.api_token = str(api_cfg.get("token") or "").strip()
+        if self.api_enabled and not self.api_token:
+            # 空 token 等于无鉴权控制面，直接拒绝启动 API
+            logger.error("[LIN] api.enabled=true 但 token 为空，已拒绝启动 API")
+            self.api_enabled = False
+        elif self.api_enabled and self.api_token in (
+                "change-me-to-a-secure-token", "changeme", "token"):
+            logger.error("[LIN] api.token 仍是示例默认值，已拒绝启动 API（请改成随机串）")
+            self.api_enabled = False
         self.api_server = None
 
         # 分布式联动配置
@@ -2608,7 +2944,7 @@ class PortSentinel:
         self.fed_sync_interval = parse_duration(
             fed_cfg.get("sync_interval", "60s"))
         self.fed_peers = []
-        for peer in fed_cfg.get("peers", []):
+        for peer in fed_cfg.get("peers") or []:
             if isinstance(peer, dict):
                 url = peer.get("url", "").rstrip("/")
                 token = peer.get("token", "")
@@ -2722,6 +3058,10 @@ class PortSentinel:
         logger.info("收到信号 %d", signum)
         self.running = False
 
+    def request_capture_restart(self):
+        """请求重建抓包 socket（由 Autopilot 在抓包异常时调用）。"""
+        self._capture_restart = True
+
     def _reload_handler(self, signum, frame):
         """SIGHUP 处理：热加载配置，不中断服务。"""
         try:
@@ -2828,6 +3168,8 @@ class PortSentinel:
         new_interval = parse_duration(
             new_config.get("monitor", {}).get("interval", self.check_interval))
         self.check_interval = new_interval
+        self._max_window = max(self.scan_window, self.brute_window,
+                               self.ddos_window, 60)
 
         self.config = new_config
         logger.info("[LIN] 配置热加载完成")
@@ -2841,12 +3183,12 @@ class PortSentinel:
         logger.info("=" * 40)
 
     def _restore_bans(self):
-        cur = self.db.conn.execute("SELECT ip FROM blocked_ips")
-        ips = [row[0] for row in cur.fetchall()]
+        ips = [row[0] for row in self.db.fetchall("SELECT ip FROM blocked_ips")]
         if ips:
             logger.info("[LIN] 恢复 %d 条封禁规则...", len(ips))
             for ip in ips:
-                self.firewall.ban(ip)
+                if not self.firewall.ban(ip):
+                    logger.error("[LIN] 恢复封禁失败: %s（记录保留，下轮重试）", ip)
 
     # ── 抓包 ──────────────────────────────────────────────────
 
@@ -2890,6 +3232,18 @@ class PortSentinel:
         logger.info("[LIN] 开始抓包监控...")
 
         while self.running:
+            if self._capture_restart:
+                self._capture_restart = False
+                try:
+                    for s in self._sockets:
+                        s.close()
+                except Exception:
+                    pass
+                socks, mode = self._create_socket()
+                self._sockets = socks
+                for s in socks:
+                    s.settimeout(1.0)
+                logger.warning("[LIN] 抓包 socket 已重建 (%s)", mode)
             if len(socks) > 1:
                 ready, _, _ = select.select(socks, [], [], 1.0)
                 if not ready:
@@ -3072,7 +3426,7 @@ class PortSentinel:
         for k in expired_keys:
             del self.alert_cooldown[k]
 
-        # syn_data 的过期清理已在 _analyze 指针交换中自然完成
+        # syn_data 按最大检测窗口在 _snapshot_windows 中滚动裁剪，无需整体交换
 
         if expired_keys:
             logger.debug("清理: %d 条冷却记录", len(expired_keys))
@@ -3140,20 +3494,51 @@ class PortSentinel:
             "自适应校准: 基线IP=%.0f SYN=%.0f, 扫描阈值=%d",
             avg_ips, avg_syns, self._adaptive_scan_threshold)
 
-    def _analyze(self):
-        """指针交换：O(1) 锁占用，锁外完成全部分析。"""
-        # 1. 指针交换：将当前 syn_data 取出，替换为空 defaultdict
-        with self._data_lock:
-            snapshot = self.syn_data
-            self.syn_data = defaultdict(lambda: {
-                "ports": deque(maxlen=300),
-                "timestamps": deque(maxlen=5000),
-                "port_counts": defaultdict(lambda: deque(maxlen=500)),
-            })
-        # 锁已释放，抓包线程可以继续写入新的 syn_data
+    @staticmethod
+    def _new_track():
+        """新建单个 IP 的追踪结构。"""
+        return {
+            "ports": deque(maxlen=300),
+            "timestamps": deque(maxlen=20000),
+            "port_counts": defaultdict(lambda: deque(maxlen=2000)),
+        }
 
-        # 2. 锁外分析快照数据
+    def _snapshot_windows(self, now):
+        """锁内裁剪超窗口数据并快照，锁外分析，避免长时间持有抓包锁。"""
+        keep = self._max_window + max(self.check_interval * 2, 5)
+        snapshot = {}
+        with self._data_lock:
+            stale = []
+            for ip, track in self.syn_data.items():
+                ts = track["timestamps"]
+                while ts and ts[0] < now - keep:
+                    ts.popleft()
+                if not ts:
+                    stale.append(ip)
+                    continue
+                port_counts = {}
+                for port, plist in track["port_counts"].items():
+                    while plist and plist[0] < now - keep:
+                        plist.popleft()
+                    if plist:
+                        port_counts[port] = list(plist)
+                snapshot[ip] = {
+                    "ports": list(track["ports"]),
+                    "timestamps": list(ts),
+                    "port_counts": port_counts,
+                }
+            for ip in stale:
+                del self.syn_data[ip]
+        return snapshot
+
+    def _analyze(self):
+        """滚动窗口分析：锁内裁剪+快照，锁外做全部检测。
+
+        不再每周期清空 syn_data —— 否则配置的 10s/60s 窗口实际只有
+        check_interval 那么长，慢速扫描与慢速暴破会永久漏报。
+        """
         now = time.time()
+        snapshot = self._snapshot_windows(now)
 
         for src_ip, snap in snapshot.items():
             if self.firewall.is_whitelisted(src_ip):
@@ -3472,7 +3857,10 @@ class PortSentinel:
             try:
                 expired = self.db.get_expired_bans()
                 for ip in expired:
-                    self.firewall.unban(ip)
+                    if not self.firewall.unban(ip):
+                        # 规则残留时保留 DB 记录，下一轮重试，避免"看似解封实则永久封禁"
+                        logger.error("[LIN] 自动解封 %s 未完成，保留记录待重试", ip)
+                        continue
                     self.db.unblock_ip(ip)
                     # 清除该 IP 的追踪数据，避免解封后立即重封
                     with self._data_lock:
@@ -3586,7 +3974,9 @@ def cmd_unban(engine, ip):
     if not engine.db.is_blocked(ip):
         print(f"[!] {ip} 不在封禁列表中")
         return
-    engine.firewall.unban(ip)
+    if not engine.firewall.unban(ip):
+        print(f"[✗] 解封失败：防火墙规则仍残留，已保留封禁记录 {ip}")
+        return
     engine.db.unblock_ip(ip)
     print(f"[✓] 已解封 {ip}")
 

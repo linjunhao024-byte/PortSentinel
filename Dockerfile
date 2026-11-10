@@ -2,19 +2,15 @@ FROM python:3.11-alpine
 
 LABEL maintainer="LIN"
 LABEL description="LIN-PortSentinel - Port Security Monitor Engine"
-LABEL version="1.0.2"
+LABEL version="1.0.3"
 LABEL org.opencontainers.image.source="https://github.com/linjunhao024-byte/PortSentinel"
 
-# 安装系统依赖
+# 只装运行期真正需要的东西：引擎是纯 Python 实现，
+# 抓包走 AF_PACKET、告警走 urllib，不需要 bash/sqlite CLI/curl/硬件查询工具
 RUN apk add --no-cache \
     iptables \
     ip6tables \
-    iproute2 \
-    conntrack-tools \
-    sqlite \
-    curl \
-    bind-tools \
-    bash
+    nftables
 
 # 创建目录结构
 RUN mkdir -p /etc/port-monitor \

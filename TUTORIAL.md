@@ -469,7 +469,7 @@ pm                    # 进入管理面板
 # 选择 [11] 测试告警
 
 # 或直接命令
-sudo port-monitor.sh test-alert
+sudo pm test-alert
 ```
 
 ---
@@ -483,7 +483,7 @@ api:
   enabled: true              # 必须启用
   host: "0.0.0.0"            # 监听地址
   port: 8900                 # 监听端口
-  token: "your-secure-token" # API 认证令牌
+  token: "your-secure-token" # 必填：空 token 会被引擎拒绝，示例默认值也会被拒绝
 ```
 
 ### 5.2 访问仪表盘
@@ -568,7 +568,7 @@ pm                    # 进入管理面板
 # 选择 [15] 导出数据
 
 # 或直接命令
-sudo port-monitor.sh export
+sudo pm export
 ```
 
 导出文件保存在当前目录：`port-sentinel-export-20260627_120000.csv`
@@ -607,7 +607,7 @@ pm                    # 进入管理面板
 # 选择 [10] IP溯源查询
 
 # 或直接命令
-sudo port-monitor.sh lookup 185.220.101.34
+sudo pm lookup 185.220.101.34
 ```
 
 **输出示例**：
@@ -829,17 +829,18 @@ autopilot:
   # 自动更新
   auto_update: true
   update_check_interval: 12h
-  auto_update_apply: true
+  # 默认关闭：更新内容无签名校验，开启等于允许远程替换 root 服务
+  auto_update_apply: false
 ```
 
 **自动修复能力**：
 
 | 问题 | 自动修复 |
 |------|---------|
-| 数据库损坏 | 重建连接 |
+| 数据库损坏 | 执行 integrity_check，失败则重建连接 |
 | 防火墙规则丢失 | 恢复封禁规则 |
 | 磁盘空间不足 | 自动清理旧数据 |
-| 抓包线程异常 | 记录告警 |
+| 抓包线程异常 | 重建抓包 socket |
 
 ---
 
@@ -852,7 +853,7 @@ pm                    # 进入管理面板
 # 选择 [4] 热加载配置
 
 # 或直接命令
-sudo port-monitor.sh reload
+sudo pm reload
 ```
 
 **热加载范围**：
@@ -894,7 +895,7 @@ docker run -d \
 ### Docker Compose
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 **注意**：
@@ -923,7 +924,7 @@ sudo pm start
 
 ```bash
 # 测试告警通道
-sudo port-monitor.sh test-alert
+sudo pm test-alert
 
 # 检查配置文件
 cat /etc/port-monitor/config.yaml | grep -A5 "alert:"
@@ -943,7 +944,7 @@ pm
 # 选择 [17] 手动解封
 
 # 或直接命令
-sudo port-monitor.sh unban
+sudo pm unban
 ```
 
 ### Q4: 如何添加白名单？
@@ -970,7 +971,7 @@ pm
 # 选择 [9] 实时监控
 
 # 或直接命令
-sudo port-monitor.sh live
+sudo pm live
 ```
 
 ### Q7: 如何导出攻击数据？
@@ -980,7 +981,7 @@ pm
 # 选择 [15] 导出数据
 
 # 或直接命令
-sudo port-monitor.sh export
+sudo pm export
 ```
 
 ### Q8: 如何更新到最新版本？
@@ -990,7 +991,7 @@ pm
 # 选择 [20] 更新程序
 
 # 或直接命令
-sudo port-monitor.sh update
+sudo pm update
 ```
 
 如果开启了无人驾驶模式，会自动检查并更新。
@@ -998,7 +999,7 @@ sudo port-monitor.sh update
 ### Q9: 如何完全卸载？
 
 ```bash
-sudo port-monitor.sh full-uninstall
+sudo pm full-uninstall
 ```
 
 ### Q10: 支持 IPv6 吗？
