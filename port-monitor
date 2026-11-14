@@ -468,14 +468,39 @@ def parse_duration(s):
 # ── IP 工具 ───────────────────────────────────────────────────
 
 def normalize_ip(ip):
-    """规范化 IP 地址：IPv4-mapped IPv6 转为纯 IPv4，IPv6 统一小写压缩。"""
+    """规范化 IP 地址：IPv4-mapped IPv6 转为纯 IPv4，IPv6 统一小写压缩。
+
+    非法输入返回 None（旧版原样返回，非法串会一路流进 iptables）。
+    """
     try:
         addr = ipaddress.ip_address(ip)
         if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
             return str(addr.ipv4_mapped)
         return str(addr)
+    except (ValueError, TypeError):
+        return None
+
+
+def validate_ip_arg(value):
+    """校验外部传入（API / 命令行 / 联邦对端）的 IP 字符串。
+
+    只接受单个合法的 IPv4/IPv6 地址；拒绝空值、非字符串、带 "/" 的 CIDR
+    （`1.2.3.4/0` 会被 iptables 当成全网，必须挡在入口）以及带 zone 的地址。
+    返回规范化后的 IP 字符串，非法返回 None。
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or "/" in candidate or "%" in candidate:
+        return None
+    ip = normalize_ip(candidate)
+    if ip is None:
+        return None
+    try:
+        ipaddress.ip_address(ip)
     except ValueError:
-        return ip
+        return None
+    return ip
 
 
 def ip_version(ip):
@@ -487,8 +512,9 @@ def ip_version(ip):
 
 
 def is_ipv6(ip):
-    """判断是否为 IPv6 地址（规范化后）。"""
-    return ip_version(normalize_ip(ip)) == 6
+    """判断是否为 IPv6 地址（规范化后）。非法输入按 IPv4 处理。"""
+    normalized = normalize_ip(ip)
+    return ip_version(normalized) == 6 if normalized else False
 
 
 # ── 数据库 ────────────────────────────────────────────────────
@@ -661,6 +687,59 @@ class Database:
 
 # ── 防火墙执行 ────────────────────────────────────────────────
 
+def hashlimit_name(ip):
+    """iptables hashlimit 规则名：限长 15 字符，用哈希避免 IPv6 截断撞名。"""
+    return "ps_" + hashlib.sha1(ip.encode()).hexdigest()[:10]
+
+
+def build_iptables_ban_commands(ip, ban_mode, v6=False):
+    """构造 iptables/ip6tables 封禁命令序列（纯函数，便于离线断言）。
+
+    rate_limit 模式下 ACCEPT（hashlimit）必须排在 DROP 之前，否则限速永远
+    不命中、等同全量封禁。iptables 的 -I 每次都插到链首，所以这里显式指定
+    插入位置：ACCEPT 插位置 1，DROP 插位置 2，最终链上顺序即 ACCEPT → DROP。
+    """
+    cmd = "ip6tables" if v6 else "iptables"
+    target = "REJECT" if ban_mode == "reject" else "DROP"
+    commands = []
+    if ban_mode == "rate_limit":
+        commands.append([
+            cmd, "-w", "5", "-I", "INPUT", "1", "-s", ip,
+            "-m", "hashlimit",
+            "--hashlimit", "2/sec",
+            "--hashlimit-burst", "5",
+            "--hashlimit-name", hashlimit_name(ip),
+            "--hashlimit-mode", "srcip",
+            "-j", "ACCEPT"])
+        commands.append([
+            cmd, "-w", "5", "-I", "INPUT", "2", "-s", ip, "-j", target])
+    else:
+        commands.append([
+            cmd, "-w", "5", "-I", "INPUT", "1", "-s", ip, "-j", target])
+    return commands
+
+
+def build_iptables_unban_commands(ip, ban_mode, v6=False):
+    """构造删除封禁规则的命令序列。
+
+    两种 target 都删：运行中改过 ban_mode 时也能把规则清干净。
+    """
+    cmd = "ip6tables" if v6 else "iptables"
+    commands = []
+    if ban_mode == "rate_limit":
+        commands.append([
+            cmd, "-w", "5", "-D", "INPUT", "-s", ip,
+            "-m", "hashlimit",
+            "--hashlimit", "2/sec",
+            "--hashlimit-burst", "5",
+            "--hashlimit-name", hashlimit_name(ip),
+            "--hashlimit-mode", "srcip",
+            "-j", "ACCEPT"])
+    for target in ("DROP", "REJECT"):
+        commands.append([cmd, "-w", "5", "-D", "INPUT", "-s", ip, "-j", target])
+    return commands
+
+
 class Firewall:
     # nftables 使用私有表，避免污染系统 filter 表
     _NFT_TABLE = "portsentinel"
@@ -702,13 +781,14 @@ class Firewall:
             return False
 
     def _hashlimit_name(self, ip):
-        """iptables hashlimit 规则名：限长 15 字符，用哈希避免 IPv6 截断撞名。"""
-        digest = hashlib.sha1(ip.encode()).hexdigest()[:10]
-        return f"ps_{digest}"
+        """兼容旧调用：与模块级 hashlimit_name() 保持同名。"""
+        return hashlimit_name(ip)
 
 
     def is_whitelisted(self, ip):
         ip = normalize_ip(ip)
+        if not ip:
+            return False
         if ip in self.whitelist:
             return True
         try:
@@ -725,6 +805,10 @@ class Firewall:
         return False
 
     def ban(self, ip):
+        ip = normalize_ip(ip) if ip else None
+        if not ip or "/" in ip:
+            logger.error("[LIN] 拒绝封禁非法 IP: %r（只接受单个 IPv4/IPv6 地址）", ip)
+            return False
         if self.is_whitelisted(ip):
             logger.warning("跳过白名单 IP: %s", ip)
             return False
@@ -740,26 +824,20 @@ class Firewall:
             if self.method == "iptables":
                 cmd = "ip6tables" if v6 else "iptables"
                 check = subprocess.run(
-                    [cmd, "-C", "INPUT", "-s", ip, "-j", target],
+                    [cmd, "-w", "5", "-C", "INPUT", "-s", ip, "-j", target],
                     capture_output=True, timeout=10)
                 if check.returncode == 0:
                     logger.info("规则已存在，跳过重复添加: %s", ip)
                     return True
-                # 限速模式：先添加 hashlimit ACCEPT 规则
-                if self.ban_mode == "rate_limit":
-                    limit_name = self._hashlimit_name(ip)
-                    subprocess.run(
-                        [cmd, "-I", "INPUT", "-s", ip,
-                         "-m", "hashlimit",
-                         "--hashlimit", "2/sec",
-                         "--hashlimit-burst", "5",
-                         "--hashlimit-name", limit_name,
-                         "--hashlimit-mode", "srcip",
-                         "-j", "ACCEPT"],
-                        capture_output=True, timeout=10)
-                result = subprocess.run(
-                    [cmd, "-I", "INPUT", "-s", ip, "-j", target],
-                    capture_output=True, timeout=10)
+                # 按固定顺序下发：rate_limit 时 ACCEPT 在位置 1、DROP 在位置 2
+                result = None
+                for argv in build_iptables_ban_commands(ip, self.ban_mode, v6):
+                    result = subprocess.run(argv, capture_output=True, timeout=10)
+                    if result.returncode != 0:
+                        logger.error(
+                            "封禁命令失败 %s: %s", ip,
+                            result.stderr.decode(errors="replace").strip())
+                        return False
             elif self.method == "firewalld":
                 family = "ipv6" if v6 else "ipv4"
                 action = "reject" if self.ban_mode == "reject" else "drop"
@@ -796,31 +874,22 @@ class Firewall:
 
     def unban(self, ip):
         """解封并核验残留：True 表示已确认不再存在该 IP 的封禁规则。"""
+        ip = normalize_ip(ip) if ip else None
+        if not ip or "/" in ip:
+            logger.error("[LIN] 拒绝解封非法 IP: %r", ip)
+            return False
         try:
             v6 = is_ipv6(ip)
             cmd = "ip6tables" if v6 else "iptables"
 
             if self.method == "iptables":
-                if self.ban_mode == "rate_limit":
-                    limit_name = self._hashlimit_name(ip)
-                    subprocess.run(
-                        [cmd, "-D", "INPUT", "-s", ip,
-                         "-m", "hashlimit",
-                         "--hashlimit", "2/sec",
-                         "--hashlimit-burst", "5",
-                         "--hashlimit-name", limit_name,
-                         "--hashlimit-mode", "srcip",
-                         "-j", "ACCEPT"],
-                        capture_output=True, timeout=10)
                 # 两种 target 都尝试删除：ban_mode 运行中被改过时仍能解封干净
-                for target in ("DROP", "REJECT"):
-                    subprocess.run(
-                        [cmd, "-D", "INPUT", "-s", ip, "-j", target],
-                        capture_output=True, timeout=10)
+                for argv in build_iptables_unban_commands(ip, self.ban_mode, v6):
+                    subprocess.run(argv, capture_output=True, timeout=10)
                 remaining = [
                     t for t in ("DROP", "REJECT")
                     if subprocess.run(
-                        [cmd, "-C", "INPUT", "-s", ip, "-j", t],
+                        [cmd, "-w", "5", "-C", "INPUT", "-s", ip, "-j", t],
                         capture_output=True, timeout=10).returncode == 0
                 ]
                 if remaining:
@@ -884,6 +953,95 @@ class Firewall:
         except Exception as e:
             logger.error("解封失败 %s: %s", ip, e)
             return False
+
+    def purge(self):
+        """清除本工具在防火墙里留下的全部痕迹（卸载 / 停机清理用）。
+
+        返回 (ok, details)：ok=False 表示仍有残留，调用方应提示人工检查。
+        """
+        details = []
+        ok = True
+        if self.method == "iptables":
+            failed = self._sweep_iptables()
+            if failed:
+                ok = False
+                details.append("残留 iptables 规则 %d 条，需人工删除" % len(failed))
+                details.extend(failed)
+            else:
+                details.append("iptables/ip6tables INPUT 链已无本工具残留规则")
+        elif self.method == "nftables":
+            probe = subprocess.run(
+                ["nft", "list", "table", "inet", self._NFT_TABLE],
+                capture_output=True, text=True, timeout=10)
+            if probe.returncode != 0:
+                details.append("nftables 私有表不存在，无需清理")
+            else:
+                deleted = subprocess.run(
+                    ["nft", "delete", "table", "inet", self._NFT_TABLE],
+                    capture_output=True, text=True, timeout=10)
+                if deleted.returncode != 0:
+                    ok = False
+                    details.append("删除 nft 私有表失败: "
+                                   + (deleted.stderr or "").strip())
+                else:
+                    details.append("已删除 nft 私有表 inet " + self._NFT_TABLE)
+        elif self.method == "firewalld":
+            listed = subprocess.run(
+                ["firewall-cmd", "--list-rich-rules"],
+                capture_output=True, text=True, timeout=10)
+            leftover = [ln.strip() for ln in (listed.stdout or "").splitlines()
+                        if "source address='" in ln]
+            if leftover:
+                ok = False
+                details.append("firewalld 仍有 %d 条 source 规则，需人工核对"
+                               % len(leftover))
+            else:
+                details.append("firewalld 无本工具 rich rule")
+        else:
+            ok = False
+            details.append("未知防火墙方法，无法清理: %s" % self.method)
+        return ok, details
+
+    def _sweep_iptables(self):
+        """扫描 INPUT 链删除本工具残留的 hashlimit 规则，返回未删掉的规则行。"""
+        failed = []
+        for cmd in ("iptables", "ip6tables"):
+            listed = subprocess.run(
+                [cmd, "-w", "5", "-S", "INPUT"],
+                capture_output=True, text=True, timeout=10)
+            if listed.returncode != 0:
+                continue
+            for line in (listed.stdout or "").splitlines():
+                if "--hashlimit-name ps_" not in line:
+                    continue
+                spec = line.split()
+                if not spec or spec[0] != "-A":
+                    continue
+                spec[0] = "-D"
+                rc = subprocess.run([cmd, "-w", "5"] + spec,
+                                    capture_output=True, timeout=10)
+                if rc.returncode != 0:
+                    failed.append(line.strip())
+        return failed
+
+
+def apply_ban_config(firewall, ban_cfg):
+    """把配置里的 ban 段应用到 Firewall 实例（启动与热加载共用同一套逻辑）。"""
+    if not isinstance(ban_cfg, dict):
+        ban_cfg = {}
+    method = ban_cfg.get("method")
+    if isinstance(method, str) and method.strip():
+        firewall.method = method.strip()
+    mode = ban_cfg.get("mode")
+    if isinstance(mode, str) and mode.strip() in ("drop", "reject", "rate_limit"):
+        firewall.ban_mode = mode.strip()
+    whitelist = ban_cfg.get("whitelist")
+    if isinstance(whitelist, (list, tuple, set)):
+        entries = {str(e).strip() for e in whitelist if str(e).strip()}
+        entries.add("127.0.0.1")
+        entries.add("::1")
+        firewall.whitelist = entries
+    return firewall
 
 
 # ── 告警推送 ──────────────────────────────────────────────────
@@ -1904,7 +2062,7 @@ class Autopilot:
         try:
             method = engine.firewall.method
             if method == "iptables":
-                probe = subprocess.run(["iptables", "-L", "-n"],
+                probe = subprocess.run(["iptables", "-w", "5", "-L", "-n"],
                                        capture_output=True, timeout=5)
                 checks["firewall"] = probe.returncode == 0
             elif method == "nftables":
@@ -2215,6 +2373,29 @@ class Autopilot:
 
 # ── HTTP API 服务 ─────────────────────────────────────────────
 
+HISTORY_LIMIT_DEFAULT = 50
+HISTORY_LIMIT_MAX = 1000
+
+
+def parse_positive_int(raw, default=1):
+    """把 query 参数解析成正整数；非法值回退默认值。
+
+    旧版直接 int() 再 min()，`limit=-5` 会变成 SQLite 的 `LIMIT -5`
+    （等于不限量，可整表导出）。
+    """
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 1 else default
+
+
+def clamp_history_limit(raw):
+    """history 分页 limit 夹紧到 [1, 1000]。"""
+    return max(1, min(parse_positive_int(raw, HISTORY_LIMIT_DEFAULT),
+                      HISTORY_LIMIT_MAX))
+
+
 class APIHandler(http.server.BaseHTTPRequestHandler):
     """轻量 HTTP API 请求处理器。"""
 
@@ -2227,18 +2408,22 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         logger.debug("API: %s", format % args)
 
     def _check_auth(self):
-        """Token 认证检查（常量时间比较防时序攻击）。空 token 视为拒绝，不再放行。"""
+        """Token 认证检查（常量时间比较防时序攻击）。空 token 视为拒绝，不再放行。
+
+        只接受请求头（Authorization: Bearer / X-API-Token）。query string 里的
+        token 会进访问日志、Referer 和浏览器历史，一律不认。
+        """
         if not self.api_token:
             return False
         token = None
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
-            token = auth[7:]
-        elif "?" in self.path:
-            qs = parse_qs(urlparse(self.path).query)
-            if "token" in qs:
-                token = qs["token"][0]
-        if token is None:
+            token = auth[7:].strip()
+        if not token:
+            header_token = self.headers.get("X-API-Token", "")
+            if header_token:
+                token = header_token.strip()
+        if not token:
             return False
         return hmac.compare_digest(token, self.api_token)
 
@@ -2426,11 +2611,17 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         if not engine:
             self._respond(503, {"error": "引擎未就绪"})
             return
-        ip = data.get("ip", "").strip()
-        if not ip:
+        raw_ip = data.get("ip", "")
+        if not isinstance(raw_ip, str) or not raw_ip.strip():
             self._respond(400, {"error": "缺少 ip 参数"})
             return
-        ip = normalize_ip(ip)
+        ip = validate_ip_arg(raw_ip)
+        if ip is None:
+            # 不落库、不下发规则：CIDR / 非法地址一律拒绝
+            self._respond(400, {
+                "error": "ip 必须是单个合法的 IPv4/IPv6 地址，不接受 CIDR 网段",
+                "ip": raw_ip})
+            return
         if engine.firewall.is_whitelisted(ip):
             self._respond(400, {"error": f"{ip} 在白名单中"})
             return
@@ -2452,11 +2643,16 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         if not engine:
             self._respond(503, {"error": "引擎未就绪"})
             return
-        ip = data.get("ip", "").strip()
-        if not ip:
+        raw_ip = data.get("ip", "")
+        if not isinstance(raw_ip, str) or not raw_ip.strip():
             self._respond(400, {"error": "缺少 ip 参数"})
             return
-        ip = normalize_ip(ip)
+        ip = validate_ip_arg(raw_ip)
+        if ip is None:
+            self._respond(400, {
+                "error": "ip 必须是单个合法的 IPv4/IPv6 地址，不接受 CIDR 网段",
+                "ip": raw_ip})
+            return
         if not engine.db.is_blocked(ip):
             self._respond(404, {"error": f"{ip} 不在封禁列表中"})
             return
@@ -2497,8 +2693,8 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             qs = parse_qs(urlparse(self.path).query)
-            page = max(int(qs.get("page", ["1"])[0]), 1)
-            limit = min(int(qs.get("limit", ["50"])[0]), 200)
+            page = parse_positive_int(qs.get("page", ["1"])[0], 1)
+            limit = clamp_history_limit(qs.get("limit", [str(HISTORY_LIMIT_DEFAULT)])[0])
             offset = (page - 1) * limit
             total = engine.db.fetchone("SELECT COUNT(*) FROM attacks")[0]
             rows = engine.db.fetchall(
@@ -2518,11 +2714,15 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self._respond(503, {"error": "引擎未就绪"})
             return
         qs = parse_qs(urlparse(self.path).query)
-        ip = qs.get("ip", [""])[0]
-        if not ip:
+        raw_ip = qs.get("ip", [""])[0]
+        if not raw_ip:
             self._respond(400, {"error": "缺少 ip 参数"})
             return
-        result = engine.threat_intel.check(normalize_ip(ip))
+        ip = validate_ip_arg(raw_ip)
+        if ip is None:
+            self._respond(400, {"error": "ip 必须是单个合法的 IPv4/IPv6 地址"})
+            return
+        result = engine.threat_intel.check(ip)
         self._respond(200, {"ip": ip, "intel": result, "cache_size": engine.threat_intel.cache_size})
 
     def _handle_threat_intel_stats(self):
@@ -2635,6 +2835,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 .section{padding:16px 24px}.section h2{font-size:16px;color:#93c5fd;margin-bottom:12px;display:flex;align-items:center;gap:8px}
 table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;padding:8px 12px;background:#1e293b;color:#9ca3af;font-weight:500}
 td{padding:8px 12px;border-bottom:1px solid #1e293b}tr:hover{background:#111827}
+.ip{color:#60a5fa}a{color:#60a5fa}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
 .badge.blocked{background:#7f1d1d;color:#fca5a5}.badge.monitored{background:#1e3a5f;color:#93c5fd}
 .badge.high{background:#7f1d1d;color:#fca5a5}.badge.medium{background:#78350f;color:#fcd34d}.badge.low{background:#14532d;color:#86efac}
@@ -2669,6 +2870,10 @@ canvas{width:100%;height:200px;background:#111827;border-radius:8px;border:1px s
 <tbody id="tbl-bans"></tbody></table></div>
 <script>
 const API=location.origin;let token='';
+// 所有服务端字段一律走 textContent，绝不拼进 innerHTML（防存储型 XSS）
+function cell(text){const td=document.createElement('td');td.textContent=(text===null||text===undefined)?'-':String(text);return td}
+function badge(label,cls){const s=document.createElement('span');s.className='badge '+(cls||'');s.textContent=String(label);return s}
+function link(label,onClick){const a=document.createElement('a');a.href='#';a.textContent=label;a.onclick=ev=>{ev.preventDefault();onClick()};return a}
 function hdr(){return token?{'Authorization':'Bearer '+token}:{}}async function api(path){try{const r=await fetch(API+path,{headers:hdr()});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function apiText(path){try{const r=await fetch(API+path,{headers:hdr()});if(!r.ok)return'';return await r.text()}catch(e){return''}}
 async function loadStatus(){const d=await api('/api/status');if(!d){document.getElementById('dot-svc').className='dot off';document.getElementById('txt-svc').textContent='离线';return}
@@ -2679,16 +2884,32 @@ document.getElementById('s-total').textContent=d.total_attacks?.toLocaleString()
 document.getElementById('s-blocked').textContent=d.blocked?.toLocaleString()||'0';
 document.getElementById('s-ips').textContent=d.unique_ips?.toLocaleString()||'0';
 const top=d.by_type?Object.entries(d.by_type).sort((a,b)=>b[1]-a[1]).slice(0,10):[];
-const tbl=document.getElementById('tbl-top');tbl.innerHTML='';
+const tbl=document.getElementById('tbl-top');tbl.textContent='';
 top.forEach(([t,c])=>{const risk=c>100?'high':c>20?'medium':'low';
-tbl.innerHTML+=`<tr><td>${t}</td><td>${c}</td><td><span class="badge ${risk}">${risk}</span></td></tr>`});}
+const tr=document.createElement('tr');tr.appendChild(cell(t));tr.appendChild(cell(c));
+const td=document.createElement('td');td.appendChild(badge(risk,risk));tr.appendChild(td);
+tbl.appendChild(tr)});}
 async function loadBans(){const d=await api('/api/bans');if(!d)return;
-const tbl=document.getElementById('tbl-bans');tbl.innerHTML='';
-(d.bans||[]).slice(0,50).forEach(b=>{tbl.innerHTML+=`<tr><td>${b.ip}</td><td>${b.attack_type}</td><td>${b.blocked_at}</td><td>${b.unblock_at}</td><td>${b.permanent?'✅':'-'}</td></tr>`});}
+const tbl=document.getElementById('tbl-bans');tbl.textContent='';
+(d.bans||[]).slice(0,50).forEach(b=>{
+const tr=document.createElement('tr');
+tr.appendChild(cell(b.ip));tr.appendChild(cell(b.attack_type));
+tr.appendChild(cell(b.blocked_at));tr.appendChild(cell(b.unblock_at));
+tr.appendChild(cell(b.permanent?'✅':'-'));
+tbl.appendChild(tr)});}
 let histPage=1;async function loadHistory(page){histPage=page;const d=await api(`/api/history?page=${page}&limit=20`);if(!d)return;
-const tbl=document.getElementById('tbl-recent');tbl.innerHTML='';(d.records||[]).forEach(r=>{
-const bc=r.blocked?'blocked':'monitored';tbl.innerHTML+=`<tr><td>${r.time}</td><td style="color:#60a5fa">${r.src_ip}</td><td>${r.attack_type}</td><td>:${r.dst_port}</td><td><span class="badge ${bc}">${r.blocked?'封禁':'监控'}</span></td></tr>`});
-document.getElementById('pager').textContent=`第${d.page}/${d.pages}页 共${d.total}条 `+(d.page>1?`<a href="#" onclick="loadHistory(${d.page-1})">上一页</a> `:'')+(d.page<d.pages?`<a href="#" onclick="loadHistory(${d.page+1})">下一页</a>`:'');}
+const tbl=document.getElementById('tbl-recent');tbl.textContent='';(d.records||[]).forEach(r=>{
+const bc=r.blocked?'blocked':'monitored';
+const tr=document.createElement('tr');
+tr.appendChild(cell(r.time));
+const ipCell=cell(r.src_ip);ipCell.className='ip';tr.appendChild(ipCell);
+tr.appendChild(cell(r.attack_type));
+tr.appendChild(cell(':'+((r.dst_port===null||r.dst_port===undefined)?'-':r.dst_port)));
+const td=document.createElement('td');td.appendChild(badge(r.blocked?'封禁':'监控',bc));tr.appendChild(td);
+tbl.appendChild(tr)});
+const pager=document.getElementById('pager');pager.textContent=`第${d.page}/${d.pages}页 共${d.total}条 `;
+if(d.page>1){pager.appendChild(link('上一页',()=>loadHistory(d.page-1)));pager.appendChild(document.createTextNode(' '));}
+if(d.page<d.pages){pager.appendChild(link('下一页',()=>loadHistory(d.page+1)));}}
 async function loadIntel(){const d=await api('/api/threat-intel/stats');if(d)document.getElementById('s-intel').textContent=d.cache_size||'0';}
 async function loadChart(){const d=await api('/api/timeseries');if(!d||!d.series)return;const canvas=document.getElementById('chart');const ctx=canvas.getContext('2d');
 canvas.width=canvas.offsetWidth*2;canvas.height=400;const W=canvas.width,H=canvas.height,pad=60;
@@ -2771,6 +2992,8 @@ class PortSentinel:
             ban_cfg.get("method", "iptables"),
             ban_cfg.get("whitelist", []),
             ban_cfg.get("mode", "drop"))
+        # 与热加载走同一条路径，保证启动与 SIGHUP 后的行为一致
+        apply_ban_config(self.firewall, ban_cfg)
 
         self.alerter = Alerter(self.config)
         self.port_mapper = PortMapper()
@@ -3082,13 +3305,9 @@ class PortSentinel:
         for e in errs:
             logger.error("[LIN] 配置错误: %s", e)
 
-        # 更新防火墙（白名单可能变化）
+        # 更新防火墙（方法、封禁模式 mode、白名单都可能变化）
         ban_cfg = new_config.get("ban", {})
-        self.firewall.method = ban_cfg.get("method", self.firewall.method)
-        new_wl = set(ban_cfg.get("whitelist", []))
-        new_wl.add("127.0.0.1")
-        new_wl.add("::1")
-        self.firewall.whitelist = new_wl
+        apply_ban_config(self.firewall, ban_cfg)
 
         # 更新告警配置和模板
         self.alerter.config = new_config
@@ -3272,6 +3491,8 @@ class PortSentinel:
 
                 if src_ip and dst_port:
                     src_ip = normalize_ip(src_ip)
+                    if not src_ip:
+                        continue  # 解析出的地址非法，直接丢弃这个包
 
                     # 统计被封禁 IP 的重复攻击
                     if self.db.is_blocked(src_ip):
@@ -3954,7 +4175,10 @@ class PortSentinel:
 # ── CLI 入口 ──────────────────────────────────────────────────
 
 def cmd_ban(engine, ip):
-    ip = normalize_ip(ip)
+    ip = validate_ip_arg(ip)
+    if ip is None:
+        print("[✗] 非法 IP：只接受单个 IPv4/IPv6 地址（不接受 CIDR 网段）")
+        return
     if engine.firewall.is_whitelisted(ip):
         print(f"[!] {ip} 在白名单中，跳过")
         return
@@ -3971,7 +4195,10 @@ def cmd_ban(engine, ip):
 
 
 def cmd_unban(engine, ip):
-    ip = normalize_ip(ip)
+    ip = validate_ip_arg(ip)
+    if ip is None:
+        print("[✗] 非法 IP：只接受单个 IPv4/IPv6 地址（不接受 CIDR 网段）")
+        return
     if not engine.db.is_blocked(ip):
         print(f"[!] {ip} 不在封禁列表中")
         return
@@ -3982,13 +4209,49 @@ def cmd_unban(engine, ip):
     print(f"[✓] 已解封 {ip}")
 
 
+def cmd_cleanup(engine):
+    """卸载 / 停机前清理：撤掉本工具下发过的全部防火墙规则（保留数据库记录）。
+
+    返回进程退出码：0 = 已确认清理干净，1 = 仍有残留需人工处理。
+    """
+    print("[*] 正在清理已下发的防火墙规则...")
+    rc = 0
+    try:
+        ips = [row[0] for row in engine.db.fetchall(
+            "SELECT ip FROM blocked_ips ORDER BY ip")]
+    except Exception as e:
+        print(f"[✗] 读取封禁列表失败: {e}")
+        return 1
+    failed = []
+    for ip in ips:
+        if not engine.firewall.unban(ip):
+            failed.append(ip)
+    if failed:
+        rc = 1
+        print(f"[✗] {len(failed)} 条封禁规则未能删除：{', '.join(failed)}")
+    else:
+        print(f"[✓] 已撤销 {len(ips)} 条封禁规则")
+    ok, details = engine.firewall.purge()
+    for line in details:
+        print(f"    {line}")
+    if not ok:
+        rc = 1
+        print("[!] 防火墙仍有残留，请手工核对：")
+        print("    iptables -S INPUT | grep -E 'ps_|DROP'")
+        print("    nft list ruleset | grep -A5 portsentinel")
+    if rc == 0:
+        print("[✓] 防火墙清理完成（数据库记录保留）")
+    return rc
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="LIN-PortSentinel - Port Security Monitor Engine")
     parser.add_argument(
         "-config", dest="config_path", help="配置文件路径")
     parser.add_argument(
-        "command", nargs="?", choices=["ban", "unban"], help="手动操作")
+        "command", nargs="?", choices=["ban", "unban", "cleanup"],
+        help="手动操作")
     parser.add_argument("ip", nargs="?", help="目标 IP")
     parser.add_argument(
         "-v", "--version", action="version",
@@ -3996,7 +4259,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command and args.ip:
+    if args.command in ("ban", "unban") and args.ip:
         if not args.config_path:
             args.config_path = "/etc/port-monitor/config.yaml"
         engine = PortSentinel(args.config_path)
@@ -4005,6 +4268,13 @@ def main():
         elif args.command == "unban":
             cmd_unban(engine, args.ip)
         engine.db.close()
+    elif args.command == "cleanup":
+        if not args.config_path:
+            args.config_path = "/etc/port-monitor/config.yaml"
+        engine = PortSentinel(args.config_path)
+        rc = cmd_cleanup(engine)
+        engine.db.close()
+        sys.exit(rc)
     elif args.config_path:
         engine = PortSentinel(args.config_path)
         engine.start()

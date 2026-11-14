@@ -879,6 +879,34 @@ _do_local_update() {
     info "[LIN] 更新完成"
 }
 
+# 撤销引擎已下发的防火墙规则（卸载前必须做，否则 DROP 规则会永久留在 INPUT 链）
+_purge_firewall_rules() {
+    local engine="$INSTALL_DIR/port-monitor"
+    if [ ! -x "$engine" ]; then
+        warn "引擎文件不存在，跳过防火墙规则清理；如有残留请手工核对 iptables -S INPUT"
+        return 0
+    fi
+    if [ ! -f "$CONFIG_FILE" ]; then
+        warn "配置文件不存在，跳过防火墙规则清理"
+        return 0
+    fi
+    info "正在撤销已下发的防火墙规则..."
+    local out rc=0
+    out=$("$engine" -config "$CONFIG_FILE" cleanup 2>&1) || rc=$?
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" | while IFS= read -r line; do
+            [ -n "$line" ] && info "$line"
+        done
+    fi
+    if [ "$rc" -ne 0 ]; then
+        warn "防火墙规则清理未完全成功 (exit $rc)"
+        warn "请手工核对：iptables -S INPUT | grep -E 'ps_|DROP'；nft list ruleset | grep -A5 portsentinel"
+        return "$rc"
+    fi
+    info "防火墙规则已清理"
+    return 0
+}
+
 do_uninstall() {
     check_root
     printf '%b\n' "${RED}警告: 将卸载服务[保留配置和数据]${NC}"
@@ -886,6 +914,8 @@ do_uninstall() {
 
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    # 先撤防火墙规则再删二进制：顺序反了就再也清不掉
+    _purge_firewall_rules || true
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
     rm -f "$INSTALL_DIR/port-monitor"
     rm -f "/usr/local/bin/port-monitor-ctl"
@@ -914,6 +944,8 @@ do_full_uninstall() {
 
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    # 先撤防火墙规则再删二进制和数据目录：顺序反了就再也清不掉
+    _purge_firewall_rules || true
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
     rm -f "$INSTALL_DIR/port-monitor"
     rm -f "/usr/local/bin/port-monitor-ctl"
