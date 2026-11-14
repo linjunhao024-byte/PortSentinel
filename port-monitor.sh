@@ -1105,6 +1105,48 @@ _get_whitelist() {
         | grep -v '^$'
 }
 
+# 在 whitelist 段插入显式分节标记；已有标记则原样返回。
+# 标记缩进 2 空格，与 ban: 下的子键对齐；条目仍缩进 4 空格。
+_ensure_whitelist_markers() {
+    local start end wl_line next_line tmp
+    start=$(grep -nF '# >>> whitelist >>>' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d: -f1)
+    end=$(grep -nF '# <<< whitelist <<<' "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d: -f1)
+    if [ -n "$start" ] && [ -n "$end" ] && [ "$end" -gt "$start" ]; then
+        return 0
+    fi
+
+    # 只有半个标记时先清掉，避免重复/错位。
+    if [ -n "$start" ] || [ -n "$end" ]; then
+        tmp=$(mktemp) || return 1
+        grep -vF '# >>> whitelist >>>' "$CONFIG_FILE"             | grep -vF '# <<< whitelist <<<' > "$tmp" || true
+        if ! cp -p "$tmp" "$CONFIG_FILE"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        rm -f "$tmp"
+    fi
+
+    wl_line=$(grep -n '^[[:space:]]*whitelist:[[:space:]]*$' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d: -f1)
+    if [ -z "$wl_line" ]; then
+        error "未找到 whitelist 配置段"
+        return 1
+    fi
+    next_line=$(awk -v start="$wl_line" 'NR>start && /^[^[:space:]#]/ {print NR; exit}' "$CONFIG_FILE")
+    tmp=$(mktemp) || return 1
+    awk -v wl="$wl_line" -v end="${next_line:-0}" '
+        NR==wl { print; print "  # >>> whitelist >>>"; next }
+        end>0 && NR==end { print "  # <<< whitelist <<<"; print; next }
+        { print }
+        END { if (end==0) print "  # <<< whitelist <<<" }
+    ' "$CONFIG_FILE" > "$tmp" || { rm -f "$tmp"; return 1; }
+    if ! cp -p "$tmp" "$CONFIG_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
 _add_whitelist_entry() {
     local entry="$1"
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -1116,22 +1158,45 @@ _add_whitelist_entry() {
         warn "$entry 已在白名单中"
         return 0
     fi
-    # 在 whitelist 段的最后一个条目后插入
-    # 找到 ban: 段中 whitelist: 后的第一个非列表行，在其前插入
-    local line_num
-    line_num=$(grep -n '^\s*-\s*"' "$CONFIG_FILE" | tail -1 | cut -d: -f1)
-    if [ -z "$line_num" ]; then
-        # 没有找到列表项，在 whitelist: 行后插入
-        line_num=$(grep -n 'whitelist:' "$CONFIG_FILE" | head -1 | cut -d: -f1)
-        if [ -z "$line_num" ]; then
-            error "未找到 whitelist 配置段"
-            return 1
-        fi
-        sed -i "${line_num}a\\    - \"${entry}\"" "$CONFIG_FILE"
-    else
-        sed -i "${line_num}a\\    - \"${entry}\"" "$CONFIG_FILE"
+
+    local backup tmp start end rc
+    backup=$(mktemp "${CONFIG_FILE}.bak.XXXXXX") || { error "无法创建配置备份"; return 1; }
+    if ! cp -p "$CONFIG_FILE" "$backup"; then
+        rm -f "$backup"
+        error "无法备份配置文件"
+        return 1
     fi
-    info "已添加白名单: $entry"
+    if ! _ensure_whitelist_markers; then
+        cp -p "$backup" "$CONFIG_FILE" 2>/dev/null || true
+        rm -f "$backup"
+        error "写入白名单分节标记失败，已恢复配置"
+        return 1
+    fi
+    start=$(grep -nF '# >>> whitelist >>>' "$CONFIG_FILE" | head -1 | cut -d: -f1)
+    end=$(grep -nF '# <<< whitelist <<<' "$CONFIG_FILE" | tail -1 | cut -d: -f1)
+    if [ -z "$start" ] || [ -z "$end" ] || [ "$end" -le "$start" ]; then
+        cp -p "$backup" "$CONFIG_FILE" 2>/dev/null || true
+        rm -f "$backup"
+        error "白名单分节标记无效，已恢复配置"
+        return 1
+    fi
+
+    tmp=$(mktemp) || { rm -f "$backup"; error "无法创建临时文件"; return 1; }
+    # 用 awk 插入，避免把 entry 当 sed 表达式解析（防注入/特殊字符）。
+    awk -v end="$end" -v entry="$entry" '
+        NR==end { print "    - \"" entry "\"" }
+        { print }
+    ' "$CONFIG_FILE" > "$tmp"
+    rc=$?
+    if [ "$rc" -eq 0 ] && cp -p "$tmp" "$CONFIG_FILE"; then
+        rm -f "$tmp" "$backup"
+        info "已添加白名单: $entry"
+        return 0
+    fi
+    cp -p "$backup" "$CONFIG_FILE" 2>/dev/null || true
+    rm -f "$tmp" "$backup"
+    error "写入白名单失败，已恢复配置"
+    return 1
 }
 
 _remove_whitelist_entry() {
@@ -2164,14 +2229,15 @@ do_health_check() {
 do_cleanup() {
     check_root
     print_banner
-    printf '%b\n' "${CYAN}${BOLD}🧹 日志与数据清理${NC}\n"
+    printf '%b\n' "${CYAN}${BOLD}🧹 日志与数据清理${NC}
+"
 
     local days
     days=$(ask "保留最近多少天的数据" "30")
 
     if ! [[ "$days" =~ ^[0-9]+$ ]] || [ "$days" -lt 1 ]; then
         error "天数必须为正整数"
-        return
+        return 1
     fi
 
     # 预览
@@ -2179,9 +2245,19 @@ do_cleanup() {
 
     local db="${DATA_DIR}/monitor.db"
     local old_records=0
+    local preview_failed=0
     if [ -f "$db" ]; then
-        old_records=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE timestamp < datetime('now', '-${days} days');" 2>/dev/null || echo "0")
-        printf '%b\n' "  数据库: ${YELLOW}${old_records}${NC} 条超过 ${days} 天的攻击记录"
+        if ! old_records=$(sqlite3 "$db" "SELECT COUNT(*) FROM attacks WHERE timestamp < datetime('now', '-${days} days');" 2>/dev/null); then
+            error "数据库预览失败（sqlite3 返回非零）"
+            preview_failed=1
+            old_records=0
+        elif ! [[ "$old_records" =~ ^[0-9]+$ ]]; then
+            error "数据库预览返回异常值: ${old_records}"
+            preview_failed=1
+            old_records=0
+        else
+            printf '%b\n' "  数据库: ${YELLOW}${old_records}${NC} 条超过 ${days} 天的攻击记录"
+        fi
     fi
 
     local old_logs=""
@@ -2200,36 +2276,66 @@ do_cleanup() {
     bak_count=$(echo "$old_backups" | grep -c '.' 2>/dev/null); bak_count="${bak_count:-0}"
     printf '%b\n' "  临时备份: ${YELLOW}${bak_count}${NC} 个 /tmp 下的旧备份"
 
-    if [ "$old_records" = "0" ] && [ -z "$old_logs" ] && [ "$bak_count" = "0" ]; then
+    if [ "$old_records" = "0" ] && [ -z "$old_logs" ] && [ "$bak_count" = "0" ] && [ "$preview_failed" = "0" ]; then
         info "无需清理"
-        return
+        return 0
     fi
 
     echo ""
     if [ "$(ask_yn "确认执行清理？" "n")" != "y" ]; then
         warn "[LIN] 已取消"
-        return
+        return "$preview_failed"
     fi
 
-    # 执行清理
+    # 执行清理：每个 sqlite3 / rm 都检查返回码，失败累计并非零退出。
+    local db_cleaned=0 file_cleaned=0 failed=$preview_failed
     if [ -f "$db" ] && [ "$old_records" != "0" ]; then
-        sqlite3 "$db" "DELETE FROM attacks WHERE timestamp < datetime('now', '-${days} days');" 2>/dev/null
-        sqlite3 "$db" "VACUUM;" 2>/dev/null
-        info "已清理 ${old_records} 条数据库记录"
+        if sqlite3 "$db" "DELETE FROM attacks WHERE timestamp < datetime('now', '-${days} days');" 2>/dev/null; then
+            db_cleaned=$((db_cleaned + old_records))
+        else
+            failed=$((failed + 1))
+            error "数据库删除失败（sqlite3 返回非零）"
+        fi
+        if sqlite3 "$db" "VACUUM;" 2>/dev/null; then
+            :
+        else
+            failed=$((failed + 1))
+            error "数据库 VACUUM 失败（sqlite3 返回非零）"
+        fi
     fi
 
     if [ -n "$old_logs" ]; then
-        while IFS= read -r f; do rm -f "$f" 2>/dev/null; done <<< "$old_logs"
-        info "已清理旧日志文件"
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if rm -f "$f" 2>/dev/null; then
+                file_cleaned=$((file_cleaned + 1))
+            else
+                failed=$((failed + 1))
+                error "删除旧日志失败: $f"
+            fi
+        done <<< "$old_logs"
     fi
 
     if [ -n "$old_backups" ]; then
-        while IFS= read -r f; do rm -f "$f" 2>/dev/null; done <<< "$old_backups"
-        info "已清理旧临时备份"
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if rm -f "$f" 2>/dev/null; then
+                file_cleaned=$((file_cleaned + 1))
+            else
+                failed=$((failed + 1))
+                error "删除临时备份失败: $f"
+            fi
+        done <<< "$old_backups"
     fi
 
     echo ""
-    info "[LIN] 清理完成"
+    local cleaned=$((db_cleaned + file_cleaned))
+    if [ "$failed" -gt 0 ]; then
+        error "已清理 ${cleaned} 项（数据库 ${db_cleaned} 条、文件 ${file_cleaned} 个）/ 失败 ${failed} 项"
+        return 1
+    fi
+    info "已清理 ${cleaned} 项（数据库 ${db_cleaned} 条、文件 ${file_cleaned} 个）/ 失败 0 项"
+    return 0
 }
 
 # ── Web 仪表盘 ──────────────────────────────────────────────

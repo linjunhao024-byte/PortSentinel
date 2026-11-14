@@ -8,11 +8,30 @@ services:
     # 让 PID 1 由 tini 代理，正确处理 SIGTERM/SIGHUP
     init: true
 
+    # 与 Dockerfile 中的 portsentinel 用户保持一致（UID/GID 10001）。
+    # 非 root 运行；iptables/nft 所需权限通过 capabilities 精确授予。
+    user: "10001:10001"
+
+    # 根文件系统只读，降低容器被攻破后的持久化风险。
+    # 需要写的位置只有数据/日志卷与 /tmp、/run。
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /run:rw,noexec,nosuid,size=16m
+
     # 网络权限：抓包 + iptables 规则
+    # NET_ADMIN：iptables/nft 增删规则；NET_RAW：AF_PACKET 原始套接字抓包。
+    # 这两项无法用普通用户权限替代，属于「必须」；风险是容器可改本机防火墙，
+    # 因此只应在受控主机运行，不要把 Docker socket 或宿主敏感目录挂进来。
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    network_mode: host  # 必须使用 host 网络才能抓取真实流量
+    security_opt:
+      - no-new-privileges:true
+    # 必须使用 host 网络才能抓取真实流量；代价是容器与宿主共享网络命名空间。
+    network_mode: host
 
     volumes:
       # 正在使用的配置（仓库已自带 config/config.yaml；改完 restart 生效）
@@ -24,14 +43,22 @@ services:
 
     environment:
       - TZ=Asia/Shanghai
+      - HOME=/var/lib/port-monitor
+      # API 默认由 config.yaml 控制；这里用环境变量显式打开，供健康检查调用。
+      # 必须同时设置 PORTSENTINEL_API_TOKEN（空 token 会被引擎拒绝）。
+      - PORTSENTINEL_API_ENABLED=${PORTSENTINEL_API_ENABLED:-1}
+      - PORTSENTINEL_API_HOST=127.0.0.1
+      - PORTSENTINEL_API_PORT=${PORTSENTINEL_API_PORT:-8900}
+      - PORTSENTINEL_API_TOKEN=${PORTSENTINEL_API_TOKEN:-}
 
-    # 健康检查：API 默认关闭且需要 token，所以检查进程本身是否存活
+    # 健康检查：调用服务自身 /api/health（带 Bearer token），不再遍历 /proc 猜进程。
+    # 端口与 token 都从环境变量取；token 为空时健康检查会失败，这是有意的 fail-closed。
     healthcheck:
-      test: ["CMD", "python3", "-c", "import os,sys;sys.exit(0 if any(p.isdigit() and b'port-monitor' in open('/proc/'+p+'/cmdline','rb').read() for p in os.listdir('/proc')) else 1)"]
+      test: ["CMD", "python3", "-c", "import os,urllib.request; p=os.environ.get('PORTSENTINEL_API_PORT','8900'); t=os.environ.get('PORTSENTINEL_API_TOKEN',''); req=urllib.request.Request('http://127.0.0.1:%s/api/health' % p, headers={'Authorization':'Bearer '+t}); urllib.request.urlopen(req, timeout=5)"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 30s
 
     logging:
       driver: "json-file"

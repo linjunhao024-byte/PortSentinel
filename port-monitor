@@ -528,7 +528,8 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
     attack_type TEXT,
     blocked_at TEXT,
     unblock_at TEXT,
-    permanent INTEGER DEFAULT 0
+    permanent INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'active'
 );
 CREATE TABLE IF NOT EXISTS attacks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -550,6 +551,10 @@ DB_MIGRATIONS = [
     # v2: 添加 service_name 列到 attacks 表
     (2, [
         "ALTER TABLE attacks ADD COLUMN service_name TEXT DEFAULT '';",
+    ]),
+    # v3: 封禁记录增加 pending/active 状态，避免「规则已下发、写库失败」黑洞
+    (3, [
+        "ALTER TABLE blocked_ips ADD COLUMN status TEXT DEFAULT 'active';",
     ]),
 ]
 
@@ -622,7 +627,13 @@ class Database:
                     except Exception:
                         pass
                     if "duplicate column" in str(e).lower():
+                        # 新库的 DB_SCHEMA 已经带了该列；仍要记版本，
+                        # 否则每次启动都会重跑同一条 ALTER。
                         logger.debug("迁移 v%d 已应用过: %s", ver, e)
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                            (ver,))
+                        self.conn.commit()
                     else:
                         logger.warning("[LIN] 数据库迁移 v%d 失败，已回滚: %s", ver, e)
 
@@ -693,7 +704,14 @@ class Database:
                     "VALUES (?,?,?,?)", rows)
                 self.conn.commit()
 
-    def block_ip(self, ip, attack_type, duration_sec, permanent=False):
+    def block_ip(self, ip, attack_type, duration_sec, permanent=False,
+                 status="active"):
+        """写封禁记录。status=pending 表示「规则还没下发成功」。
+
+        调用方必须先写 pending，再下发防火墙规则，成功后再 set_ban_status(active)。
+        这样进程在两步之间崩溃时，启动恢复能看见 pending 记录并重试/清理，
+        不会出现「规则已生效、数据库没记录」或反向的永久黑洞。
+        """
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         if permanent:
             unblock_at = "2099-01-01 00:00:00"
@@ -703,23 +721,35 @@ class Database:
                 "%Y-%m-%d %H:%M:%S",
                 time.localtime(time.time() + duration_sec))
             perm = 0
+        status = "pending" if str(status).lower() == "pending" else "active"
         with self._lock:
             try:
                 # UPSERT：续封只刷新时长/类型，保留首次封禁时间
                 self.conn.execute(
                     "INSERT INTO blocked_ips "
-                    "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?) "
+                    "(ip,attack_type,blocked_at,unblock_at,permanent,status) "
+                    "VALUES (?,?,?,?,?,?) "
                     "ON CONFLICT(ip) DO UPDATE SET "
                     "attack_type=excluded.attack_type, "
-                    "unblock_at=excluded.unblock_at, permanent=excluded.permanent",
-                    (ip, attack_type, now, unblock_at, perm))
+                    "unblock_at=excluded.unblock_at, permanent=excluded.permanent, "
+                    "status=excluded.status",
+                    (ip, attack_type, now, unblock_at, perm, status))
             except sqlite3.OperationalError:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO blocked_ips "
-                    "(ip,attack_type,blocked_at,unblock_at,permanent) VALUES (?,?,?,?,?)",
-                    (ip, attack_type, now, unblock_at, perm))
+                    "(ip,attack_type,blocked_at,unblock_at,permanent,status) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (ip, attack_type, now, unblock_at, perm, status))
             self.conn.commit()
             self._blocked_cache.add(ip)
+
+    def set_ban_status(self, ip, status):
+        """把封禁记录从 pending 置为 active（或回退）。"""
+        status = "pending" if str(status).lower() == "pending" else "active"
+        with self._lock:
+            self.conn.execute(
+                "UPDATE blocked_ips SET status=? WHERE ip=?", (status, ip))
+            self.conn.commit()
 
     def fetchall(self, sql, params=()):
         """带锁读：API 线程与检测线程共用同一 sqlite 连接。"""
@@ -752,7 +782,8 @@ class Database:
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         with self._lock:
             cur = self.conn.execute(
-                "SELECT ip FROM blocked_ips WHERE permanent=0 AND unblock_at<=?", (now,))
+                "SELECT ip FROM blocked_ips WHERE permanent=0 AND unblock_at<=? "
+                "AND COALESCE(status,'active')='active'", (now,))
             return [row[0] for row in cur.fetchall()]
 
     def close(self):
@@ -2122,9 +2153,15 @@ class FederationManager:
                         continue
                     perm = ban.get("permanent", False)
                     dur = PERMANENT_BAN_SECONDS if perm else self._calc_remaining(ban)
+                    self._db.block_ip(
+                        ip, f"peer:{ban.get('attack_type', 'unknown')}", dur,
+                        permanent=perm, status="pending")
                     if self._firewall.ban(ip):
-                        self._db.block_ip(ip, f"peer:{ban.get('attack_type', 'unknown')}", dur, permanent=perm)
+                        self._db.set_ban_status(ip, "active")
                         synced += 1
+                    else:
+                        self._db.unblock_ip(ip)
+                        logger.error("[LIN] 联动封禁规则下发失败，已回滚记录: %s", ip)
                 pushed += self._push_bans(peer)
             except Exception:
                 fail += 1
@@ -2145,8 +2182,10 @@ class FederationManager:
 
     def _push_bans(self, peer):
         url = f"{peer['url']}/api/sync"
+        # 只同步已确认生效的封禁；pending 还没下发成功，推给邻居会造成假封禁。
         cur = self._db.conn.execute(
-            "SELECT ip, attack_type, unblock_at, permanent FROM blocked_ips")
+            "SELECT ip, attack_type, unblock_at, permanent FROM blocked_ips "
+            "WHERE COALESCE(status,'active')='active'")
         bans = [{"ip": r[0], "attack_type": r[1], "unblock_at": r[2], "permanent": bool(r[3])}
                 for r in cur.fetchall()]
         body = json.dumps({"node_id": self._node_id, "bans": bans}).encode()
@@ -2894,12 +2933,17 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             return
         duration = parse_duration(data.get("duration", "24h"))
         permanent = data.get("permanent", False)
+        # 先落 pending，再下发规则；规则失败就回滚，避免永久黑洞。
+        engine.db.block_ip(ip, "manual_api", duration,
+                           permanent=permanent, status="pending")
         if engine.firewall.ban(ip):
-            engine.db.block_ip(ip, "manual_api", duration, permanent=permanent)
+            engine.db.set_ban_status(ip, "active")
             engine.db.record_attack(ip, "manual_api", 0, blocked=True)
             engine.db.flush()
             self._respond(200, {"ok": True, "ip": ip, "duration": duration})
         else:
+            engine.db.unblock_ip(ip)
+            logger.error("[LIN] API 封禁规则下发失败，已回滚记录: %s", ip)
             self._respond(500, {"error": "封禁失败"})
 
     def _handle_unban(self, data):
@@ -3422,6 +3466,20 @@ class PortSentinel:
         self.api_host = str(api_cfg.get("host", "127.0.0.1") or "127.0.0.1")
         self.api_port = _to_int(api_cfg.get("port", 8900), 8900)
         self.api_token = str(api_cfg.get("token") or "").strip()
+        # 容器/环境变量覆盖：健康检查与只读根文件系统下，配置仍可只读挂载。
+        env_enabled = os.environ.get("PORTSENTINEL_API_ENABLED")
+        if env_enabled is not None:
+            self.api_enabled = env_enabled.strip().lower() in (
+                "1", "true", "yes", "on")
+        env_host = os.environ.get("PORTSENTINEL_API_HOST")
+        if env_host:
+            self.api_host = env_host.strip()
+        env_port = os.environ.get("PORTSENTINEL_API_PORT")
+        if env_port:
+            self.api_port = _to_int(env_port, self.api_port)
+        env_token = os.environ.get("PORTSENTINEL_API_TOKEN")
+        if env_token is not None:
+            self.api_token = env_token.strip()
         if self.api_enabled and not self.api_token:
             # 空 token 等于无鉴权控制面，直接拒绝启动 API
             logger.error("[LIN] api.enabled=true 但 token 为空，已拒绝启动 API")
@@ -3712,13 +3770,70 @@ class PortSentinel:
                 f":{p}" for p in sorted(self.honeypot_ports)))
         logger.info("=" * 40)
 
+    _PENDING_BAN_TIMEOUT = 300  # pending 超过 5 分钟视为中断残留
+
     def _restore_bans(self):
-        ips = [row[0] for row in self.db.fetchall("SELECT ip FROM blocked_ips")]
-        if ips:
-            logger.info("[LIN] 恢复 %d 条封禁规则...", len(ips))
-            for ip in ips:
-                if not self.firewall.ban(ip):
-                    logger.error("[LIN] 恢复封禁失败: %s（记录保留，下轮重试）", ip)
+        """启动恢复：过期记录清理、pending 重试/回滚、active 重新下发。"""
+        now = time.time()
+        rows = self.db.fetchall(
+            "SELECT ip, unblock_at, permanent, COALESCE(status,'active'), blocked_at "
+            "FROM blocked_ips")
+        expired = []
+        pending_retry = []
+        pending_stale = []
+        active = []
+        for ip, unblock_at, permanent, status, blocked_at in rows:
+            if status == "pending":
+                try:
+                    age = now - time.mktime(time.strptime(blocked_at, "%Y-%m-%d %H:%M:%S"))
+                except (ValueError, TypeError, OverflowError):
+                    age = 0
+                if age > self._PENDING_BAN_TIMEOUT:
+                    pending_stale.append(ip)
+                else:
+                    pending_retry.append(ip)
+            elif not permanent and unblock_at and unblock_at <= time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(now)):
+                expired.append(ip)
+            else:
+                active.append(ip)
+
+        cleared = failed = rebound = 0
+        for ip in expired:
+            # 过期记录不再下发；尽量撤掉上一次进程留下的规则，再清库。
+            if self.firewall.unban(ip):
+                self.db.unblock_ip(ip)
+                cleared += 1
+            else:
+                failed += 1
+                logger.error("[LIN] 过期封禁 %s 的旧规则未能撤销，保留记录待重试", ip)
+        for ip in pending_stale:
+            # pending 可能已经下发过规则但没来得及置 active；先尝试撤销，避免黑洞。
+            if self.firewall.unban(ip):
+                self.db.unblock_ip(ip)
+                cleared += 1
+                logger.warning("[LIN] 清理超时 pending 封禁记录: %s", ip)
+            else:
+                failed += 1
+                logger.error("[LIN] 超时 pending 封禁 %s 的旧规则未能撤销，保留记录待重试", ip)
+        for ip in pending_retry:
+            if self.firewall.ban(ip):
+                self.db.set_ban_status(ip, "active")
+                rebound += 1
+            else:
+                self.db.unblock_ip(ip)
+                failed += 1
+                logger.error("[LIN] pending 封禁 %s 重试失败，已回滚记录", ip)
+        for ip in active:
+            if self.firewall.ban(ip):
+                rebound += 1
+            else:
+                failed += 1
+                logger.error("[LIN] 恢复封禁失败: %s（记录保留，下轮重试）", ip)
+        if rows:
+            logger.info(
+                "[LIN] 启动恢复：清理过期/超时 %d 条，重试 pending %d 条，恢复 active %d 条，失败 %d 条",
+                cleared, len(pending_retry), rebound, failed)
 
     # ── 抓包 ──────────────────────────────────────────────────
 
@@ -4258,12 +4373,16 @@ class PortSentinel:
             logger.info("威胁情报命中 %s: %s, 封禁延长至 %s",
                         src_ip, intel.get("source"), self._format_duration(duration_sec))
 
+        # 先写 pending，再下发规则；成功置 active，失败回滚。
+        self.db.block_ip(
+            src_ip, attack_type, duration_sec, permanent=permanent,
+            status="pending")
         success = self.firewall.ban(src_ip)
         if not success:
+            self.db.unblock_ip(src_ip)
+            logger.error("[LIN] 封禁规则下发失败，已回滚记录: %s", src_ip)
             return
-
-        self.db.block_ip(
-            src_ip, attack_type, duration_sec, permanent=permanent)
+        self.db.set_ban_status(src_ip, "active")
         self.db.record_attack(
             src_ip, attack_type, dst_port, blocked=True)
 
@@ -4305,11 +4424,14 @@ class PortSentinel:
         duration = (PERMANENT_BAN_SECONDS if permanent
                     else self.honeypot_ban_duration)
 
+        self.db.block_ip(src_ip, "honeypot", duration,
+                         permanent=permanent, status="pending")
         success = self.firewall.ban(src_ip)
         if not success:
+            self.db.unblock_ip(src_ip)
+            logger.error("[LIN] 蜜罐封禁规则下发失败，已回滚记录: %s", src_ip)
             return
-
-        self.db.block_ip(src_ip, "honeypot", duration, permanent=permanent)
+        self.db.set_ban_status(src_ip, "active")
         self.db.record_attack(src_ip, "honeypot", dst_port, blocked=True)
 
         duration_str = "永久" if permanent else self._format_duration(duration)
@@ -4449,11 +4571,16 @@ class PortSentinel:
                             duration = max(int(unblock_ts - time.time()), 60)
                         except (ValueError, TypeError):
                             duration = 86400  # 默认 24 小时
+                    self.db.block_ip(ip, atype, duration,
+                                     permanent=permanent, status="pending")
                     if self.firewall.ban(ip):
-                        self.db.block_ip(ip, atype, duration,
-                                         permanent=permanent)
+                        self.db.set_ban_status(ip, "active")
                         synced += 1
                         logger.info("联动封禁: %s (来源: %s)", ip, peer["url"])
+                    else:
+                        self.db.unblock_ip(ip)
+                        logger.error(
+                            "[LIN] 联动封禁规则下发失败，已回滚记录: %s", ip)
             except Exception as e:
                 fail_count += 1
                 logger.debug("节点 %s 同步失败: %s", peer["url"], e)
@@ -4495,13 +4622,16 @@ def cmd_ban(engine, ip):
     if engine.db.is_blocked(ip):
         print(f"[!] {ip} 已在封禁列表中")
         return
+    engine.db.block_ip(ip, "manual", PERMANENT_BAN_SECONDS,
+                       permanent=True, status="pending")
     if engine.firewall.ban(ip):
-        engine.db.block_ip(ip, "manual", PERMANENT_BAN_SECONDS, permanent=True)
+        engine.db.set_ban_status(ip, "active")
         engine.db.record_attack(ip, "manual", 0, blocked=True)
         engine.db.flush()
         print(f"[✓] 已封禁 {ip}")
     else:
-        print(f"[✗] 封禁失败")
+        engine.db.unblock_ip(ip)
+        print(f"[✗] 封禁失败（数据库记录已回滚）")
 
 
 def cmd_unban(engine, ip):
