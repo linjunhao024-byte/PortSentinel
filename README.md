@@ -766,3 +766,17 @@ sudo pm test-alert
 ![Footer](https://capsule-render.vercel.app/api?type=waving&color=0:0f0f0f,50:fce300,100:00f0ff&height=120&section=footer&fontSize=12&fontColor=ffffff&descAlignY=60&animation=twinkling)
 
 </div>
+
+## 跑测试
+
+```bash
+python tests/_ps_p2a_tests.py   # 运行期/规则
+python tests/_ps_p2b_tests.py   # 部署/清理
+```
+
+离线：`subprocess` 被 `FakeSubprocess` 接管（只记录 argv，**绝不执行任何真实 iptables/nft**）、sqlite 一律用临时库、API handler 用 `object.__new__` 构造不监听端口。
+
+- `_ps_p2a_tests.py`（30 项）：iptables 统一补 `-w` 并查返回码、nft 表链分别校验重建、缓冲区丢弃出指标、SQLite 统一连接、token 拒绝查询串、history limit 非法值 400、热重载切 method/mode 清旧规则。
+- `_ps_p2b_tests.py`（15 项）：容器非 root + 只读根、健康检查走 `/api/health`、封禁 pending/active 状态机与启动恢复、白名单分节标记、cleanup 查返回码。
+
+单次跑 `_ps_p2b_tests.py` 约 80 秒；它偶发一次 error，重跑即过（时序相关，非逻辑错误）。
