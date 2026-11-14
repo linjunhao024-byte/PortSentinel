@@ -28,6 +28,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+# parse_qs/urlparse 在 do_GET/do_POST 与各 /api/* 处理器里是裸用的，
+# 但此前从未导入 —— 任何带查询串的请求都会 NameError（等于 REST API 不可用）。
+from urllib.parse import parse_qs, urlparse
 from collections import defaultdict, deque
 from email.mime.text import MIMEText
 from smtplib import SMTP, SMTP_SSL
@@ -552,10 +555,14 @@ DB_MIGRATIONS = [
 
 
 class Database:
+    # 连接参数：busy_timeout 让并发写（CLI 与守护进程）排队等待，
+    # 而不是立刻抛 "database is locked"。
+    _CONNECT_TIMEOUT = 10.0    # sqlite3.connect(timeout=...) 秒
+    _BUSY_TIMEOUT_MS = 10000   # PRAGMA busy_timeout 毫秒
+
     def __init__(self, db_path):
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = self._connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(DB_SCHEMA)
@@ -563,8 +570,31 @@ class Database:
         self._lock = threading.Lock()
         self._blocked_cache = set()
         self._pending_writes = []
+        self._dropped_total = 0
+        self._drop_hour = time.strftime("%Y-%m-%d %H")
+        self._drop_hour_dropped = 0
+        self._drop_last_warn = 0.0
         self._load_blocked_cache()
         self._migrate()
+
+    @classmethod
+    def _connect(cls, db_path):
+        """建立 SQLite 连接（全进程唯一入口）。
+
+        旧版直接 os.makedirs(os.path.dirname(db_path))：db_path 只有文件名
+        （如 "port_monitor.db"）时 dirname 是空串，makedirs("") 抛
+        FileNotFoundError 直接崩；也没有 busy_timeout，CLI 与守护进程同时
+        写会立刻 database is locked。这里先 abspath 再建目录，并统一设
+        timeout 与 busy_timeout。
+        """
+        path = str(db_path)
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        conn = sqlite3.connect(path, timeout=cls._CONNECT_TIMEOUT,
+                               check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=%d" % cls._BUSY_TIMEOUT_MS)
+        return conn
 
     def _migrate(self):
         """执行数据库迁移。"""
@@ -601,11 +631,56 @@ class Database:
             cur = self.conn.execute("SELECT ip FROM blocked_ips")
             self._blocked_cache = {row[0] for row in cur.fetchall()}
 
+    _PENDING_MAX = 50000        # 待写缓冲区上限
+    _DROP_WARN_EVERY = 1000     # 每丢弃这么多条告警一次
+    _DROP_WARN_INTERVAL = 300.0 # 两次告警的最小间隔（秒）
+
     def record_attack(self, src_ip, attack_type, dst_port, blocked=False):
+        """入缓冲区；缓冲区满时记账 + 限流告警，返回是否入队成功。"""
         with self._lock:
-            if len(self._pending_writes) < 50000:
+            if len(self._pending_writes) < self._PENDING_MAX:
                 self._pending_writes.append(
                     (src_ip, attack_type, dst_port, int(blocked)))
+                return True
+            self._note_dropped()
+            return False
+
+    def _note_dropped(self):
+        """缓冲区满时计数并告警（旧版静默丢弃，丢了数据没人知道）。"""
+        now = time.time()
+        hour = time.strftime("%Y-%m-%d %H", time.localtime(now))
+        if hour != self._drop_hour:
+            if self._drop_hour_dropped:
+                logger.warning("[LIN] %s 时段的攻击记录因缓冲区满丢弃 %d 条",
+                               self._drop_hour, self._drop_hour_dropped)
+            self._drop_hour = hour
+            self._drop_hour_dropped = 0
+        self._dropped_total += 1
+        self._drop_hour_dropped += 1
+        due_count = (self._drop_hour_dropped % self._DROP_WARN_EVERY) == 0
+        due_time = (now - self._drop_last_warn) >= self._DROP_WARN_INTERVAL
+        if due_count or due_time:
+            self._drop_last_warn = now
+            logger.warning(
+                "[LIN] 攻击记录缓冲区已满（上限 %d 条），已丢弃 %d 条"
+                "（本小时 %d 条，累计 %d 条）：检测仍在进行，但历史记录缺失",
+                self._PENDING_MAX, self._dropped_total,
+                self._drop_hour_dropped, self._dropped_total)
+
+    @property
+    def dropped_total(self):
+        """累计因缓冲区满而丢弃的攻击记录数（对外指标）。"""
+        with self._lock:
+            return self._dropped_total
+
+    def drop_stats(self):
+        """缓冲区与丢弃计数快照（/api/stats、/api/metrics 用）。"""
+        with self._lock:
+            return {"pending": len(self._pending_writes),
+                    "capacity": self._PENDING_MAX,
+                    "dropped_total": self._dropped_total,
+                    "dropped_this_hour": self._drop_hour_dropped,
+                    "drop_hour": self._drop_hour}
 
     def flush(self):
         """批量提交所有待写入记录（每检测周期调用一次）。"""
@@ -687,6 +762,32 @@ class Database:
 
 # ── 防火墙执行 ────────────────────────────────────────────────
 
+def _env_int(name, default):
+    """读环境变量里的整数，非法值回退默认值（不抛异常）。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("[LIN] 环境变量 %s=%r 不是整数，回退默认值 %s",
+                       name, raw, default)
+        return default
+
+
+# xtables 锁等待秒数：并发（其他防火墙工具/多线程）时 -w 让 iptables 排队
+# 等锁，而不是直接报 "Another app is currently holding the xtables lock"。
+IPTABLES_WAIT = _env_int("PORTSENTINEL_IPTABLES_WAIT", 5)
+
+
+def _err_text(result):
+    """取子进程 stderr 文本（text=True / bytes 两种模式都能用）。"""
+    err = getattr(result, "stderr", b"") or b""
+    if isinstance(err, bytes):
+        err = err.decode(errors="replace")
+    return err.strip()
+
+
 def hashlimit_name(ip):
     """iptables hashlimit 规则名：限长 15 字符，用哈希避免 IPv6 截断撞名。"""
     return "ps_" + hashlib.sha1(ip.encode()).hexdigest()[:10]
@@ -748,6 +849,8 @@ class Firewall:
     def __init__(self, method, whitelist=None, ban_mode="drop"):
         self.method = method
         self.ban_mode = ban_mode  # "drop" | "reject" | "rate_limit"
+        # iptables/ip6tables 统一等待锁的秒数（-w），可用环境变量覆盖
+        self.iptables_wait = IPTABLES_WAIT
         if not isinstance(whitelist, (list, tuple, set)):
             logger.warning("[LIN] ban.whitelist 不是列表，已忽略（块状列表需每项以 '-' 开头）")
             whitelist = []
@@ -755,30 +858,93 @@ class Firewall:
         self.whitelist.add("127.0.0.1")
         self.whitelist.add("::1")
 
-    def _ensure_nft(self):
-        """幂等创建私有 nft 表与 input 链，返回是否可用。"""
+    def _iptables(self, args, text=False, timeout=10, warn=True):
+        """统一的 iptables/ip6tables 调用入口（第 1 条 P2 的落点）。
+
+        - 自动补 `-w <iptables_wait>`：并发时排队等 xtables 锁，而不是直接
+          失败（旧版每条命令各写各的，漏写 -w 就静默失败）；
+        - 返回码非 0 记 WARN（带命令与 stderr），并原样返回结果对象；
+        - 子进程异常/超时返回 None，调用方必须当失败处理。
+
+        warn=False 用于「失败是正常语义」的探测（-C 检查规则是否存在）。
+        """
+        argv = [str(a) for a in args]
+        if argv and "-w" not in argv and "--wait" not in argv:
+            argv[1:1] = ["-w", str(self.iptables_wait)]
         try:
-            probe = subprocess.run(
-                ["nft", "list", "table", "inet", self._NFT_TABLE],
-                capture_output=True, timeout=10)
-            if probe.returncode == 0:
-                return True
-            subprocess.run(["nft", "add", "table", "inet", self._NFT_TABLE],
-                           capture_output=True, timeout=10)
-            add_chain = subprocess.run(
-                ["nft", "add", "chain", "inet", self._NFT_TABLE, self._NFT_CHAIN,
-                 "{ type filter hook input priority 0 ; }"],
-                capture_output=True, timeout=10)
-            if add_chain.returncode != 0:
-                logger.error("nftables 建链失败: %s",
-                             add_chain.stderr.decode(errors="replace").strip())
-                return False
-            logger.info("[LIN] nftables 已建立私有表 %s:%s",
-                        self._NFT_TABLE, self._NFT_CHAIN)
-            return True
+            res = subprocess.run(argv, capture_output=True, text=text,
+                                 timeout=timeout)
         except Exception as e:
-            logger.error("nftables 初始化失败: %s", e)
+            if warn:
+                logger.warning("[LIN] iptables 调用异常: %s (%s)",
+                               " ".join(argv), e)
+            return None
+        if res.returncode != 0 and warn:
+            logger.warning("[LIN] iptables 调用失败 rc=%d: %s: %s",
+                           res.returncode, " ".join(argv), _err_text(res))
+        return res
+
+    def _iptables_has_rule(self, cmd, ip, target):
+        """规则是否存在（-C 探测，rc!=0 不算错误）。"""
+        res = self._iptables([cmd, "-C", "INPUT", "-s", ip, "-j", target],
+                             warn=False)
+        return res is not None and res.returncode == 0
+
+    @staticmethod
+    def _nft_ok(argv):
+        """nft 探测命令是否成功（对象不存在时 nft 返回非 0）。"""
+        try:
+            return subprocess.run(argv, capture_output=True,
+                                  timeout=10).returncode == 0
+        except Exception:
             return False
+
+    def _ensure_nft(self):
+        """幂等创建私有 nft 表与 input 链，返回是否可用（兼容旧调用）。"""
+        ok, err = self._ensure_nft_checked()
+        if not ok:
+            logger.error("[LIN] nftables 不可用: %s", err)
+        return ok
+
+    def _ensure_nft_checked(self):
+        """校验 table + 本项目用到的 chain，缺则重建并复查。返回 (ok, 错误说明)。
+
+        旧版只探 `nft list table` 就 return True：表还在、链被删（人工清理、
+        重启后 chain 丢失、别的工具误删）时，后续 add rule 全部失败且无人
+        知晓。这里表与链分开探、缺哪个补哪个，补完再复查一遍。
+        """
+        table_argv = ["nft", "list", "table", "inet", self._NFT_TABLE]
+        chain_argv = ["nft", "list", "chain", "inet",
+                      self._NFT_TABLE, self._NFT_CHAIN]
+        try:
+            rebuilt = []
+            if not self._nft_ok(table_argv):
+                res = subprocess.run(
+                    ["nft", "add", "table", "inet", self._NFT_TABLE],
+                    capture_output=True, timeout=10)
+                if res.returncode != 0:
+                    return False, "建立 nft 表失败: %s" % _err_text(res)
+                rebuilt.append("table")
+            if not self._nft_ok(chain_argv):
+                res = subprocess.run(
+                    ["nft", "add", "chain", "inet", self._NFT_TABLE,
+                     self._NFT_CHAIN, "{ type filter hook input priority 0 ; }"],
+                    capture_output=True, timeout=10)
+                if res.returncode != 0:
+                    return False, "建立 nft 链失败: %s" % _err_text(res)
+                rebuilt.append("chain")
+            # 复查：表与链都必须真的在，否则后面 add rule 必失败
+            if not self._nft_ok(table_argv):
+                return False, "复查失败：nft 表 inet %s 不存在" % self._NFT_TABLE
+            if not self._nft_ok(chain_argv):
+                return False, ("复查失败：nft 链 %s:%s 不存在"
+                               % (self._NFT_TABLE, self._NFT_CHAIN))
+            if rebuilt:
+                logger.warning("[LIN] nftables 私有表/链缺失（%s），已重建 %s:%s",
+                               "+".join(rebuilt), self._NFT_TABLE, self._NFT_CHAIN)
+            return True, ""
+        except Exception as e:
+            return False, "nftables 初始化异常: %s" % e
 
     def _hashlimit_name(self, ip):
         """兼容旧调用：与模块级 hashlimit_name() 保持同名。"""
@@ -823,20 +989,15 @@ class Firewall:
 
             if self.method == "iptables":
                 cmd = "ip6tables" if v6 else "iptables"
-                check = subprocess.run(
-                    [cmd, "-w", "5", "-C", "INPUT", "-s", ip, "-j", target],
-                    capture_output=True, timeout=10)
-                if check.returncode == 0:
+                if self._iptables_has_rule(cmd, ip, target):
                     logger.info("规则已存在，跳过重复添加: %s", ip)
                     return True
                 # 按固定顺序下发：rate_limit 时 ACCEPT 在位置 1、DROP 在位置 2
                 result = None
                 for argv in build_iptables_ban_commands(ip, self.ban_mode, v6):
-                    result = subprocess.run(argv, capture_output=True, timeout=10)
-                    if result.returncode != 0:
-                        logger.error(
-                            "封禁命令失败 %s: %s", ip,
-                            result.stderr.decode(errors="replace").strip())
+                    result = self._iptables(argv)
+                    if result is None or result.returncode != 0:
+                        logger.error("[LIN] 封禁命令失败 %s（详见上一条 WARN）", ip)
                         return False
             elif self.method == "firewalld":
                 family = "ipv6" if v6 else "ipv4"
@@ -849,7 +1010,9 @@ class Firewall:
                     ["firewall-cmd", "--reload"],
                     capture_output=True, timeout=10)
             elif self.method == "nftables":
-                if not self._ensure_nft():
+                nft_ok, nft_err = self._ensure_nft_checked()
+                if not nft_ok:
+                    logger.error("[LIN] nftables 不可用，跳过封禁 %s: %s", ip, nft_err)
                     return False
                 addr_type = "ip6" if v6 else "ip"
                 target_nft = "reject" if self.ban_mode == "reject" else "drop"
@@ -883,15 +1046,12 @@ class Firewall:
             cmd = "ip6tables" if v6 else "iptables"
 
             if self.method == "iptables":
-                # 两种 target 都尝试删除：ban_mode 运行中被改过时仍能解封干净
+                # 两种 target 都尝试删除：ban_mode 运行中被改过时仍能解封干净。
+                # 规则本来就可能不存在（rc!=0 属正常），故 warn=False。
                 for argv in build_iptables_unban_commands(ip, self.ban_mode, v6):
-                    subprocess.run(argv, capture_output=True, timeout=10)
-                remaining = [
-                    t for t in ("DROP", "REJECT")
-                    if subprocess.run(
-                        [cmd, "-w", "5", "-C", "INPUT", "-s", ip, "-j", t],
-                        capture_output=True, timeout=10).returncode == 0
-                ]
+                    self._iptables(argv, warn=False)
+                remaining = [t for t in ("DROP", "REJECT")
+                             if self._iptables_has_rule(cmd, ip, t)]
                 if remaining:
                     logger.error("[LIN] 解封 %s 失败，规则仍残留: -j %s",
                                  ip, "/".join(remaining))
@@ -1002,14 +1162,69 @@ class Firewall:
             details.append("未知防火墙方法，无法清理: %s" % self.method)
         return ok, details
 
+    def purge_method(self, method, ips=()):
+        """清理「指定 method」留下的规则（热加载切换 method/mode 时用）。
+
+        与 purge() 的区别：purge() 只看 self.method（当前配置），而切换前
+        的旧规则属于旧 method，必须显式点名才能清掉。ips 是当前已封禁的 IP
+        列表：iptables/firewalld 按 IP 精确删（两种 target 都删），nftables
+        直接删私有表。返回 (ok, details)。
+        """
+        details = []
+        ok = True
+        method = method or self.method
+        ip_list = [normalize_ip(i) for i in ips]
+        ip_list = [i for i in ip_list if i]
+        if method == "iptables":
+            for ip in ip_list:
+                v6 = is_ipv6(ip)
+                for argv in build_iptables_unban_commands(ip, "rate_limit", v6):
+                    self._iptables(argv, warn=False)
+            failed = self._sweep_iptables()
+            if failed:
+                ok = False
+                details.append("iptables 仍有 %d 条 hashlimit 规则残留" % len(failed))
+            else:
+                details.append("iptables 已清理 %d 个 IP 的规则" % len(ip_list))
+        elif method == "nftables":
+            probe = subprocess.run(
+                ["nft", "list", "table", "inet", self._NFT_TABLE],
+                capture_output=True, text=True, timeout=10)
+            if probe.returncode != 0:
+                details.append("nftables 私有表不存在，无需清理")
+            else:
+                res = subprocess.run(
+                    ["nft", "delete", "table", "inet", self._NFT_TABLE],
+                    capture_output=True, text=True, timeout=10)
+                if res.returncode != 0:
+                    ok = False
+                    details.append("删除 nft 私有表失败: "
+                                   + (res.stderr or "").strip())
+                else:
+                    details.append("已删除 nft 私有表 inet " + self._NFT_TABLE)
+        elif method == "firewalld":
+            for ip in ip_list:
+                family = "ipv6" if is_ipv6(ip) else "ipv4"
+                for action in ("reject", "drop"):
+                    subprocess.run(
+                        ["firewall-cmd", "--remove-rich-rule",
+                         "rule family='%s' source address='%s' %s"
+                         % (family, ip, action), "--permanent"],
+                        capture_output=True, timeout=10)
+            subprocess.run(["firewall-cmd", "--reload"],
+                           capture_output=True, timeout=10)
+            details.append("firewalld 已清理 %d 个 IP 的 rich rule" % len(ip_list))
+        else:
+            ok = False
+            details.append("未知防火墙方法，无法清理: %s" % method)
+        return ok, details
+
     def _sweep_iptables(self):
         """扫描 INPUT 链删除本工具残留的 hashlimit 规则，返回未删掉的规则行。"""
         failed = []
         for cmd in ("iptables", "ip6tables"):
-            listed = subprocess.run(
-                [cmd, "-w", "5", "-S", "INPUT"],
-                capture_output=True, text=True, timeout=10)
-            if listed.returncode != 0:
+            listed = self._iptables([cmd, "-S", "INPUT"], text=True, warn=False)
+            if listed is None or listed.returncode != 0:
                 continue
             for line in (listed.stdout or "").splitlines():
                 if "--hashlimit-name ps_" not in line:
@@ -1018,9 +1233,8 @@ class Firewall:
                 if not spec or spec[0] != "-A":
                     continue
                 spec[0] = "-D"
-                rc = subprocess.run([cmd, "-w", "5"] + spec,
-                                    capture_output=True, timeout=10)
-                if rc.returncode != 0:
+                rc = self._iptables([cmd] + spec, warn=False)
+                if rc is None or rc.returncode != 0:
                     failed.append(line.strip())
         return failed
 
@@ -1848,6 +2062,14 @@ class ExportManager:
         except Exception:
             blocked = 0
         lines.append(f"portsentinel_blocked_ips {blocked}")
+        try:
+            dropped = int(self.db.dropped_total)
+        except Exception:
+            dropped = 0
+        lines.append("# HELP portsentinel_dropped_records_total "
+                     "Attack records dropped because the write buffer was full")
+        lines.append("# TYPE portsentinel_dropped_records_total counter")
+        lines.append("portsentinel_dropped_records_total %d" % dropped)
         lines.append("# HELP portsentinel_attacks_total Total attacks by type")
         lines.append("# TYPE portsentinel_attacks_total counter")
         try:
@@ -2391,9 +2613,28 @@ def parse_positive_int(raw, default=1):
 
 
 def clamp_history_limit(raw):
-    """history 分页 limit 夹紧到 [1, 1000]。"""
+    """history 分页 limit 夹紧到 [1, 1000]（宽松版，非法值回退默认）。"""
     return max(1, min(parse_positive_int(raw, HISTORY_LIMIT_DEFAULT),
                       HISTORY_LIMIT_MAX))
+
+
+def parse_history_limit(raw):
+    """history 分页 limit：合法整数夹到 [1, 1000]，非法值返回 None。
+
+    与 clamp_history_limit 的区别：这里把「不是整数」和「超范围」区分开，
+    调用方可以据此回 400，而不是默默给个默认值（旧版 limit=-5 直接变成
+    SQLite 的 LIMIT -5，等于不限量、可整表导出）。
+    """
+    if raw is None:
+        return HISTORY_LIMIT_DEFAULT
+    text = str(raw).strip()
+    if not text:
+        return HISTORY_LIMIT_DEFAULT
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(value, HISTORY_LIMIT_MAX))
 
 
 class APIHandler(http.server.BaseHTTPRequestHandler):
@@ -2407,13 +2648,31 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         """重定向到 logger。"""
         logger.debug("API: %s", format % args)
 
+    _auth_reason = "未授权"
+
     def _check_auth(self):
         """Token 认证检查（常量时间比较防时序攻击）。空 token 视为拒绝，不再放行。
 
         只接受请求头（Authorization: Bearer / X-API-Token）。query string 里的
-        token 会进访问日志、Referer 和浏览器历史，一律不认。
+        token 会进访问日志、Referer 和浏览器历史，一律不认 —— 而且要明确告诉
+        调用方「为什么被拒」，否则只会看到一句「未授权」去反复试。
         """
+        self._auth_reason = "未授权"
         if not self.api_token:
+            self._auth_reason = "服务端未配置 API token，API 已禁用"
+            return False
+        # 查询串里带 token：直接拒绝（记 WARN，但绝不把 token 本身写进日志）
+        try:
+            query = parse_qs(urlparse(self.path).query)
+        except Exception:
+            query = {}
+        if query.get("token"):
+            logger.warning(
+                "[LIN] 拒绝通过 URL 查询串传递 API token（%s）——它会泄漏到"
+                "访问日志、Referer 与浏览器历史；请改用请求头",
+                urlparse(self.path).path)
+            self._auth_reason = ("不接受查询串中的 token，请改用 "
+                                 "Authorization: Bearer <token> 或 X-API-Token 请求头")
             return False
         token = None
         auth = self.headers.get("Authorization", "")
@@ -2424,8 +2683,13 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             if header_token:
                 token = header_token.strip()
         if not token:
+            self._auth_reason = ("缺少认证信息，请用 "
+                                 "Authorization: Bearer <token> 或 X-API-Token 请求头")
             return False
-        return hmac.compare_digest(token, self.api_token)
+        if not hmac.compare_digest(token, self.api_token):
+            self._auth_reason = "token 无效"
+            return False
+        return True
 
     def _respond(self, code, data):
         """发送 JSON 响应。"""
@@ -2438,7 +2702,7 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._check_auth():
-            self._respond(401, {"error": "未授权"})
+            self._respond(401, {"error": self._auth_reason})
             return
 
         path = urlparse(self.path).path
@@ -2483,7 +2747,7 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._check_auth():
-            self._respond(401, {"error": "未授权"})
+            self._respond(401, {"error": self._auth_reason})
             return
 
         path = urlparse(self.path).path
@@ -2694,7 +2958,13 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         try:
             qs = parse_qs(urlparse(self.path).query)
             page = parse_positive_int(qs.get("page", ["1"])[0], 1)
-            limit = clamp_history_limit(qs.get("limit", [str(HISTORY_LIMIT_DEFAULT)])[0])
+            limit = parse_history_limit(qs.get("limit", [""])[0])
+            if limit is None:
+                self._respond(400, {
+                    "error": "limit 必须是整数（范围 1~%d）" % HISTORY_LIMIT_MAX})
+                return
+            # 双保险：即使 parse_history_limit 将来被改坏，也拿不到越界值
+            limit = clamp_history_limit(limit)
             offset = (page - 1) * limit
             total = engine.db.fetchone("SELECT COUNT(*) FROM attacks")[0]
             rows = engine.db.fetchall(
@@ -3293,6 +3563,40 @@ class PortSentinel:
         except Exception as e:
             logger.error("配置热加载失败: %s", e)
 
+    def _switch_ban_plan(self, old_method, old_mode):
+        """防火墙方法/封禁模式变更后：清掉旧规则，再按新配置重新下发封禁。
+
+        不清旧规则会留下「配置说 nftables、内核里还挂着 iptables DROP」这种
+        状态，后续 unban 也只认当前 method，规则永远删不掉。
+        """
+        new_method = self.firewall.method
+        new_mode = self.firewall.ban_mode
+        logger.warning("[LIN] 防火墙配置变更: %s/%s → %s/%s，开始清理旧规则",
+                       old_method, old_mode, new_method, new_mode)
+        try:
+            ips = [r[0] for r in self.db.fetchall("SELECT ip FROM blocked_ips")]
+        except Exception as e:
+            ips = []
+            logger.error("[LIN] 读取已封禁列表失败，旧规则清理可能不完整: %s", e)
+        try:
+            ok, details = self.firewall.purge_method(old_method, ips)
+            for line in details:
+                logger.info("[LIN] 旧规则清理: %s", line)
+            if not ok:
+                logger.error("[LIN] 旧防火墙规则未清理干净，请人工核对")
+        except Exception as e:
+            logger.error("[LIN] 清理旧防火墙规则异常: %s", e)
+        rebound = 0
+        for ip in ips:
+            try:
+                if self.firewall.ban(ip):
+                    rebound += 1
+            except Exception as e:
+                logger.error("[LIN] 重新封禁 %s 失败: %s", ip, e)
+        logger.warning(
+            "[LIN] 防火墙配置已切换 %s/%s → %s/%s，重新下发封禁 %d/%d 条",
+            old_method, old_mode, new_method, new_mode, rebound, len(ips))
+
     def _reload_config(self):
         """重新加载配置文件，更新运行时参数，保留封禁状态和连接。"""
         logger.info("=" * 40)
@@ -3305,9 +3609,15 @@ class PortSentinel:
         for e in errs:
             logger.error("[LIN] 配置错误: %s", e)
 
-        # 更新防火墙（方法、封禁模式 mode、白名单都可能变化）
+        # 更新防火墙（方法、封禁模式 mode、白名单都可能变化）。
+        # 旧版只改内存字段：旧 method 的链/旧 mode 的 DROP 会一直留在内核里，
+        # 和新配置打架（例如从 iptables 切到 nftables 后，iptables 的封禁仍生效）。
         ban_cfg = new_config.get("ban", {})
+        old_method = self.firewall.method
+        old_mode = self.firewall.ban_mode
         apply_ban_config(self.firewall, ban_cfg)
+        if (old_method, old_mode) != (self.firewall.method, self.firewall.ban_mode):
+            self._switch_ban_plan(old_method, old_mode)
 
         # 更新告警配置和模板
         self.alerter.config = new_config
