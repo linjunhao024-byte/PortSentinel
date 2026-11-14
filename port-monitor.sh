@@ -738,6 +738,9 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$DATA_DIR
+# 不设 PYTHONUNBUFFERED 时 python 输出按块缓冲，journalctl -f 看不到实时日志
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
 ExecStart=$INSTALL_DIR/port-monitor -config $CONFIG_FILE
 Restart=always
 RestartSec=5
@@ -2049,9 +2052,11 @@ do_live_monitor() {
     fi
 
     local last_ts=""
-    trap 'echo ""; info "已退出监控"; exit 0' INT TERM
+    local stop_live=0
+    # Ctrl+C 只退出这个实时视图、回到主菜单；原来是 exit 0，会把整个面板一起关掉
+    trap 'stop_live=1' INT TERM
 
-    while true; do
+    while [ "$stop_live" -eq 0 ]; do
         local rows
         rows=$(sqlite3 -separator '|' "$db" \
             "SELECT datetime(timestamp,'localtime'), src_ip, attack_type, dst_port, CASE WHEN blocked=1 THEN '封禁' ELSE '监控' END \
@@ -2092,6 +2097,9 @@ do_live_monitor() {
         fi
         sleep 2
     done
+    trap - INT TERM
+    echo ""
+    info "已退出实时监控，返回主菜单"
 }
 
 # ── 一键健康检查 ─────────────────────────────────────────────
